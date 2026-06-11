@@ -647,73 +647,17 @@ to rewrite the same roster.md (If-Match would catch it but produces
 spurious 409 noise and unclear ownership). Same arbitration rule as
 Step 0.25 cold-start bootstrap.
 
-**Failure mode this guards against:** in prior runs, analysts who were
-not in the dissolving team consistently deferred enactment thinking
-"I'm non-affected, this isn't my job." Meanwhile analysts who WERE in
-the dissolving team couldn't enact (often the proposer or unable to
-self-vouch). Result: GPU agents in the dissolving team lost 3+
-consecutive cycles of work waiting for the merge to be enacted by
-nobody. This step exists to break that deadlock — the enactor is
-explicitly NOT required to be affected.
+**Why:** this breaks a deadlock where neither the affected nor the non-affected
+analysts enact the merge — so the enactor is explicitly NOT required to be affected.
 
 If none of the conditions hold, this step is a no-op — proceed to Step 1e.
 
-### Step 1e — Compute-Budget Audit — REQUIRED UNCONDITIONALLY
+### Step 1e — Compute-Budget Audit — N/A for this task
 
-**This step OVERRIDES team STANDBY, formal dormancy, partial-wake,
-wake-for-one, and any other "don't propose this cycle" state.** Those
-states mean the team's dimension is exhausted at the current compute
-budget — they do NOT mean the compute budget itself is exhausted. If
-the budget is not binding, STANDBY is the wrong state: the team's
-dimension may be tapped out but a larger compute configuration is a
-strictly new search space that the team has not explored. Run this
-audit and post the required proposal even if your team is in STANDBY
-or dormant. The proposal unblocks the team from its own STANDBY.
-
-Extract the most recent champion run's compute utilization (from its
-training log, `champion.md` frontmatter, or the linked result file —
-whichever your task records it in). Look for:
-
-- **Memory headroom** — e.g. peak VRAM used vs available, peak RAM used
-  vs available, or the analogous memory resource on your hardware.
-- **Compute efficiency** — e.g. measured FLOPs/s vs theoretical peak,
-  MFU, GPU utilization %, or the analogous throughput metric.
-
-Compare against the available budget:
-
-- **If memory utilization < ~70% OR compute efficiency < ~50%**, the
-  current training run is NOT binding against the compute budget. Idle
-  capacity is the largest untouched axis in the search space. Your
-  highest-priority `[PROPOSAL]` this cycle MUST be a **scale-up probe**:
-  a change that increases compute consumed per step, such as larger
-  batch size, larger model width/depth, longer sequence length, more
-  training steps per budget, or lifting any `*_OVERRIDE` constant that
-  was inherited from a smaller-model baseline. The second proposal
-  may be on any axis your team's hypothesis predicts is productive.
-
-- **If memory utilization ≥ ~70% AND compute efficiency ≥ ~50%**, the
-  run is binding — proceed to normal proposal workflow.
-
-A scale-up probe is always in-scope for any team — teams are
-hypothesis-based, not axis-based. If your team's hypothesis doesn't
-predict the scale-up probe will KEEP, propose it anyway (it is still
-mandatory) but note the tension: either a KEEP here falsifies your
-hypothesis or its DISCARD supports it.
-
-**Why this step is mandatory and unconditional:** if the compute
-budget is the largest underutilized resource, every search within the
-current budget is exploring a strict subset of the reachable
-hypothesis space. Tuning within a 50%-of-peak configuration while the
-other 50% sits idle is a known failure mode of team-dimension-bounded
-search. This step breaks out of it.
-
-**Task-portability note:** the exact thresholds (70% memory, 50%
-compute) are defaults. If your task or hardware has a different
-practical utilization target, record the correct thresholds in
-`task/TASK.md` and read them here instead.
-The principle — "if the budget isn't binding, scale-up is your
-highest-priority probe" — applies regardless of the specific
-numbers.
+This task has no compute-budget-scaling axis: evaluation is a fixed, deterministic
+relaxation of a fixed molecule set — there is no model size, batch size, sequence
+length, or hardware-utilization knob to scale into. Nothing to audit here; this
+step is a no-op. Proceed to Step 2.
 
 ### Step 2 — Prune Dead Ends
 
