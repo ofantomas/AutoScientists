@@ -548,7 +548,7 @@ cand_valid = (score is not None) and (int(score.get("is_valid", 0)) == 1)
 # under the energy gate, so champion.md may have no valid fitness recorded.
 # `status: awaiting_baseline` or a missing/None metric_value ⇒ no valid champion.
 champ_status   = fresh_champ.get("status")
-champ_fitness  = fresh_champ.get(metric_name)
+champ_fitness  = fresh_champ.get("metric_value")
 have_valid_champion = (champ_status not in ("awaiting_baseline", None)) and \
                       (champ_fitness is not None) and (float(champ_fitness) < 1000.0)
 current_best = float(champ_fitness) if have_valid_champion else None

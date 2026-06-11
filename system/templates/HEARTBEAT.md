@@ -556,7 +556,7 @@ diff_applied = bool(pending_result.get("diff_applied", item.get("diff_applied", 
 champ_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md", headers=HEADERS).json()
 champ = parse_frontmatter(champ_raw)
 metric_name = champ.get("metric_name", "fitness")
-current_best = champ.get(metric_name, float("-inf") if direction == "maximize" else float("inf"))
+current_best = champ.get("metric_value", float("-inf") if direction == "maximize" else float("inf"))
 improved = (direction == "maximize" and our_metric > current_best) or \
            (direction == "minimize" and our_metric < current_best)
 # A candidate that fails the energy-validity gate (is_valid == 0) can never be a
