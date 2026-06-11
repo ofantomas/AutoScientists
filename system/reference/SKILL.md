@@ -72,7 +72,7 @@ Agents may create additional files (analysis docs, hypothesis lists, etc.). Use 
 - **Notifications for alerts** — `notify_agents` on post creation
 - **PATCH for concurrency** — dot-notation frontmatter updates don't conflict
 - **Client-side YAML parsing** — the API stores files as raw text. Agents must parse YAML frontmatter themselves (see `API-REFERENCE.md`)
-- **Champion propagation** — orchestrator copies winning train.py to `{FOCUS_ROOT}/champion/train.py` after each KEEP. All CPU-eval agents read from this canonical path
+- **Champion propagation** — orchestrator copies the winning `algo.py` to `{FOCUS_ROOT}/champion/algo.py` after each KEEP. All CPU-eval agents read from this canonical path
 
 ## Discussion-Before-Queuing Rule
 

@@ -105,7 +105,7 @@ pending:
   - id: exp_foo
     priority: high
     bold_bet: true
-    diff: "Add mechanism X to forward pass..."
+    diff: "Add mechanism X to minimize_func..."
     paper: "arXiv:XXXX.XXXXX"
     proposed_by: analyst_1
     proposal_post: "post-uuid"

@@ -2,7 +2,7 @@
 
 You are the **orchestrator** for this multi-agent focus area. Your job is to set up and run a system of AI agents that collaboratively work on a benchmark task.
 
-This file is the **base program**: it defines the universal control flow that every task type shares. Task-specific behavior — stop criteria, GPU dispatch policy, champion promotion, discussion rules — lives in `task-profile.md` (selected by `launch.py` based on `task_type` in `task/TASK.md` frontmatter).
+This file is the **base program**: it defines the universal control flow that every task type shares. Task-specific behavior — stop criteria, CPU-eval dispatch policy, champion promotion, discussion rules — lives in `task-profile.md` (selected by `launch.py` based on `task_type` in `task/TASK.md` frontmatter).
 
 ## How to use this file
 
@@ -15,7 +15,7 @@ If `task-profile.md` is missing, abort and ask the user — `launch.py` should h
 ## Universal rules
 
 **THE ORCHESTRATOR IS A PURE COORDINATOR. IT NEVER RUNS EXPERIMENTS.**
-No matter what happens — agents time out, agents fail, queues are empty, the deadline is close — the orchestrator's response is always to launch (or re-launch) an agent, never to run training or write results itself. No `python train.py`, no model fitting, no feature engineering, no writing `submission.csv` by hand. The orchestrator's only file writes are champion-promotion copies (Step 5e) and log appends. See "What You NEVER Do" for the full list.
+No matter what happens — agents time out, agents fail, queues are empty — the orchestrator's response is always to launch (or re-launch) an agent, never to evaluate a candidate or write results itself. No running `eval_candidate.py`, no editing `algo.py`, no hand-writing results. The orchestrator's only file writes are champion-promotion copies (Step 5e) and log appends. See "What You NEVER Do" for the full list.
 
 **NEVER STOP. NEVER ASK PERMISSION. LOOP CONTINUOUSLY.**
 Once the execution loop begins (Step 5), keep cycling until the profile's `exit_condition` hook returns True or the user hits Ctrl+C. Do not pause to ask "should I keep going?" after 3, 5, 10, or any number of cycles. The user may be away for hours or days. Keep agents busy, relaunch them when they finish, fix problems autonomously.
@@ -93,7 +93,7 @@ task_name = task_meta.get("name", "task")
 PREFIX    = (FOCUS_ROOT / "AGENT_PREFIX").read_text().strip() if (FOCUS_ROOT / "AGENT_PREFIX").exists() else FOCUS_ROOT.name
 ```
 
-→ PROFILE HOOK: `bootstrap_extras` (e.g. deadline clock, GPU detection — set any extra variables this profile needs)
+→ PROFILE HOOK: `bootstrap_extras` (e.g. eval-head/Redis reachability check — set any extra variables this profile needs)
 
 ## Step 2 — Read key files
 
@@ -202,7 +202,7 @@ while True:
 
 ### 5a. Pre-cycle check
 
-→ PROFILE HOOK: `pre_cycle_check` (default: no-op returning False; biomlbench uses this for deadline checks and emergency submission)
+→ PROFILE HOOK: `pre_cycle_check` (default: no-op returning False; e.g. an optimization profile can use this for an eval-pool health check)
 
 ### 5b. Launch analysts IN PARALLEL
 
@@ -237,10 +237,10 @@ for analyst_name in analysts:
 
 ### 5c. Launch CPU-eval agents
 
-→ PROFILE HOOK: `cpu_dispatch` (REQUIRED — defines sequential vs parallel, CUDA assignment, mixed dispatch, etc.)
+→ PROFILE HOOK: `cpu_dispatch` (REQUIRED — defines sequential vs parallel launch of CPU-eval agents, etc.)
 
 This is the biggest variation between profiles, so the entire body lives in the profile. Common rules:
-- Never launch two CPU-eval agents on the same physical GPU at the same time.
+- Candidate evaluation runs on the remote CPU-eval pool, not on any local device — there is no GPU to contend over.
 - Always set `MODE=execute` in the prompt.
 - Each agent reads its own HEARTBEAT.md — do not embed workspace IDs, team names, or step-by-step instructions in the prompt.
 
@@ -265,7 +265,7 @@ with open(FOCUS_ROOT / "logs" / "sessions.jsonl", "a") as f:
 
 → PROFILE HOOK: `champion_promotion` (REQUIRED — defines what "best" means and what artifacts to copy where)
 
-This is the SINGLE point at which the orchestrator writes to shared canonical paths (`task/submission.csv`, `champion/train.py`, `champion.md`). Agents never write these directly.
+This is the SINGLE point at which the orchestrator writes to shared canonical paths (`champion/algo.py`, `champion.md`). Agents never write these directly.
 
 ### 5f. Health check
 
@@ -311,7 +311,7 @@ if log_path.exists():
             stagnation_response(cycle_count)   # ← PROFILE HOOK
 ```
 
-→ PROFILE HOOK: `stagnation_response` (default: print a warning; optimization stops the loop; biomlbench posts [STUCK] and continues)
+→ PROFILE HOOK: `stagnation_response` (default: print a warning; an optimization profile may post a [STUCK] notice and keep looping, or trigger Phase 4 restructuring)
 
 ### 5h. Periodic hooks
 
@@ -333,8 +333,8 @@ If True, fall through to Step 6. Otherwise continue from Step 5a.
 
 ## What you NEVER do
 
-- Run training experiments yourself (agents do this — no `python train.py`)
-- Modify `train.py`, `submission.csv`, or any code in agent workspaces
+- Evaluate candidates yourself (agents do this — no running `eval_candidate.py`)
+- Modify `algo.py` or any code in agent workspaces
 - Claim experiments from any queue
 - Write result files
 - Overwrite `champion.md` except via the `champion_promotion` hook

@@ -7,27 +7,22 @@ bootstraps agents, workspace, and kickoff post.
 Usage:
   python3 launch.py                                                        # auto-names: {template}_{timestamp}/
   python3 launch.py my-experiment                                          # creates ../my-experiment/
-  python3 launch.py my-experiment --task task-protein-gym                 # bundled task (relative path)
-  python3 launch.py my-experiment --task task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca
+  python3 launch.py my-experiment --task task-sella                       # bundled task (relative path)
   python3 launch.py my-experiment --task /absolute/path/to/task-dir
   python3 launch.py my-experiment --output-dir /tmp/runs                  # create in a specific parent dir
 
 Task directories are bundled as subdirectories of this repo:
-  task-protein-gym/           — ProteinGym Spike fitness prediction (evolves repo/kermut.py)
-  task-biomlbench/<category>/<task>/  — BioMLBench supervised ML tasks (agents write from scratch)
+  task-sella/                 — Molecular-geometry optimizer; agents improve repo/algo.py,
+                                scored by eval_candidate.py (fitness = mean_rel_steps, lower is better)
 
 Additional tasks can be pointed to via an absolute or relative path to any directory
 containing a TASK.md file.
 
 Task types (set via task_type: in TASK.md frontmatter):
-  proteingym  — Kermut GP evolution task. Example:
-                  python3 launch.py my-run --task task-protein-gym
-  biomlbench  — Supervised ML benchmark; excludes train.py/submission.csv from task copy
-                (agents build these from scratch). Example:
-                  python3 launch.py my-run --task task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca
-  optimization — Open-ended optimization of a baseline (e.g. autoresearch nanoGPT
-                val_bpb minimisation). Example:
-                  python3 launch.py my-run --task task-autoresearch
+  optimization — Open-ended optimization of a baseline. The bundled task-sella ships its
+                own repo/ (algo.py) and champion/, and a candidate is scored by
+                eval_candidate.py (minimise fitness). Example:
+                  python3 launch.py my-run --task task-sella
 
 Profile resolution: launch.py walks up from the --task path looking for the
 nearest LAUNCH.md (bounded to this repo), letting a family-level LAUNCH.md
@@ -80,7 +75,7 @@ _parser = argparse.ArgumentParser(description="Launch a fresh AutoScientists exp
 _parser.add_argument("name", nargs="?", default=None,
                      help="Experiment name (default: {template}_{timestamp})")
 _parser.add_argument("--task", default=None,
-                     help="Path to a bundled task directory (e.g. task-protein-gym or task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca) or an absolute path to any directory containing TASK.md. Defaults to $TASK_DIR.")
+                     help="Path to a bundled task directory (e.g. task-sella) or an absolute path to any directory containing TASK.md. Defaults to $TASK_DIR.")
 _parser.add_argument("--output-dir", default=None, metavar="DIR",
                      help="Parent directory for the new experiment (default: next to this template)")
 _parser.add_argument("--protein", default=None, metavar="PROTEIN_ID",
@@ -107,8 +102,7 @@ if RUN_DIR.exists():
 task_source = _args.task or os.getenv("TASK_DIR")
 if not task_source:
     print("ERROR: --task is required. Pass a bundled task directory or an absolute path:")
-    print("  python3 launch.py my-run --task task-protein-gym")
-    print("  python3 launch.py my-run --task task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca")
+    print("  python3 launch.py my-run --task task-sella")
     sys.exit(1)
 
 # Resolve relative to template if not absolute, otherwise honour the absolute path.
@@ -119,18 +113,16 @@ if not _task_path.is_dir():
     raise RuntimeError(f"Task directory not found: {_task_path}")
 task_source = str(_task_path)
 
-# Require TASK.md at the --task root. Without this, passing a task-family
-# directory (e.g. --task task-biomlbench instead of a leaf subtask) would
-# silently fall back to the family README, fail to parse its frontmatter,
-# default to task_type=optimization, and copy the whole family tree into
-# the run dir. Validate here, BEFORE mkdir, so failure leaves no empty dir.
+# Require TASK.md at the --task root. Without this, passing a directory that
+# only holds a README would silently fall back to that README, fail to parse
+# its frontmatter, default to task_type=optimization, and copy an unintended
+# tree into the run dir. Validate here, BEFORE mkdir, so failure leaves no
+# empty dir.
 if not (_task_path / "TASK.md").exists():
     print(f"ERROR: {task_source} has no TASK.md.")
-    print(f"  --task must point at a leaf task directory containing TASK.md, not a family root.")
-    print(f"  Examples:")
-    print(f"    python3 launch.py my-run --task task-autoresearch")
-    print(f"    python3 launch.py my-run --task task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca")
-    print(f"    python3 launch.py my-run --task task-protein-gym")
+    print(f"  --task must point at a task directory containing TASK.md.")
+    print(f"  Example:")
+    print(f"    python3 launch.py my-run --task task-sella")
     sys.exit(1)
 
 print(f"Creating experiment: {RUN_DIR}")
@@ -152,7 +144,7 @@ def _read_task_md(task_dir):
         if p.exists():
             return p.read_text(), name
     return (
-        "---\ntask_type: optimization\nmetric: val_bpb\n---\n"
+        "---\ntask_type: optimization\nmetric: fitness\n---\n"
         f"# Task\n\nFound no TASK.md/program.md/README.md in {task_dir}. "
         "Using minimal defaults.\n",
         "synthesized",
@@ -166,33 +158,18 @@ if len(_task_md_parts) >= 3:
     _task_meta = _yaml.safe_load(_task_md_parts[1]) or {}
     _task_type = _task_meta.get("task_type", "optimization")
 
-IS_BENCHMARK = _task_type == "biomlbench"
-IS_PROTEINGYM = _task_type == "proteingym"
-
-if IS_BENCHMARK:
-    print(f"  Task type: biomlbench (train.py/submission.csv/answers.csv excluded from task copy; data included)")
-    _wall_clock = 16 if "A100" in _task_md_content else 8
-    _cpu_only = 'CUDA_VISIBLE_DEVICES=""' in _task_md_content or "CPU-only" in _task_md_content
-    print(f"  Wall-clock limit: {_wall_clock}h  |  CPU-only: {_cpu_only}")
-elif IS_PROTEINGYM:
-    print(f"  Task type: proteingym (repo/kermut.py evolution; LAUNCH.md used as task-profile)")
+print(f"  Task type: {_task_type}")
 
 # Copy template files into the ablation directory
 shutil.copytree(TEMPLATE_DIR / "system", RUN_DIR / "system")
 
 # Always copy to "task/" in run directory for consistency.
-# For biomlbench tasks: exclude train.py and submission.csv — agents build these.
-# data is always included so agents can train.
-# autoscientists_submission/ and private/ are always excluded — they contain reference
-# solutions and held-out answers that must never be visible to agents.
-# .git is excluded so cloned upstream repos (e.g. task-autoresearch/repo from
-# git clone karpathy/autoresearch) don't drag a hundreds-of-MB .git tree into
-# every run directory; __pycache__ keeps stale bytecode from leaking across runs.
+# autoscientists_submission/ and private/ are always excluded — they hold reference
+# solutions / held-out answers that must never be visible to agents.
+# .git is excluded so a bundled task repo doesn't drag a large .git tree into every
+# run directory; __pycache__ keeps stale bytecode from leaking across runs.
 _always_exclude = ("autoscientists_submission", "private", ".git", "__pycache__")
-if IS_BENCHMARK:
-    _task_copy_ignore = shutil.ignore_patterns(*_always_exclude, "train.py", "submission.csv", "answers.csv", "test_original_kaggle_unlabelled", "ISSUE.md", "training_scripts")
-else:
-    _task_copy_ignore = shutil.ignore_patterns(*_always_exclude)
+_task_copy_ignore = shutil.ignore_patterns(*_always_exclude)
 shutil.copytree(TEMPLATE_DIR / task_source, RUN_DIR / "task", ignore=_task_copy_ignore, symlinks=True)
 
 # Copy the base runbook plus the matching task profile.
@@ -210,9 +187,8 @@ else:
     print(f"  Copied: {program_file}")
 
 # Resolve the task-profile by walking up from the task dir looking for
-# LAUNCH.md. Lets a family-level LAUNCH.md (e.g. task-biomlbench/LAUNCH.md)
-# cover every subtask, while a per-task LAUNCH.md (e.g. inside
-# task-protein-gym/ or a specific biomlbench subtask) takes precedence.
+# LAUNCH.md. Lets a family-level LAUNCH.md cover several subtasks, while a
+# per-task LAUNCH.md (e.g. inside task-sella/) takes precedence.
 # Bounded to TEMPLATE_DIR so external task paths don't leak in arbitrary
 # LAUNCH.mds from the filesystem. Every task must ship a LAUNCH.md;
 # there is no generic fallback.
@@ -235,14 +211,10 @@ _task_launch_md = _find_bundled_launch_md(_task_path, TEMPLATE_DIR)
 if not _task_launch_md:
     print(f"ERROR: no LAUNCH.md found by walking up from {_task_path}.")
     print(f"  Every task must ship a LAUNCH.md (the task-profile that fills the")
-    print(f"  hooks referenced by runbook.md). See task-autoresearch/LAUNCH.md,")
-    print(f"  task-biomlbench/LAUNCH.md, or task-protein-gym/LAUNCH.md as references.")
+    print(f"  hooks referenced by runbook.md). See task-sella/LAUNCH.md as a reference.")
     sys.exit(1)
 shutil.copy2(_task_launch_md, RUN_DIR / "task-profile.md")
 print(f"  Copied: {_task_launch_md.relative_to(TEMPLATE_DIR)} → task-profile.md")
-
-if IS_BENCHMARK:
-    print(f"  To run: open {RUN_DIR}/{program_file} in a Claude Code session and follow it.")
 
 # ── Protein substitution ─────────────────────────────────────
 # If --protein is given, rewrite the placeholder protein name in task/*.md files.
@@ -401,24 +373,18 @@ if (TEMPLATE_DIR / ".key").exists():
 
 # ── repo/ and champion/ setup ────────────────────────────────
 #
-# Three cases, determined by what's in the task source directory:
+# Two cases, determined by what's in the task source directory:
 #
-#   1. biomlbench (IS_BENCHMARK): no repo/, no champion/ — agents write from scratch
-#   2. Task-bundled repo (task dir has its own repo/ and champion/) — copy
-#      those, skip the karpathy clone entirely
-#   3. Default (autoresearch): clone the upstream URL hardcoded below, seed champion/train.py
+#   1. Task-bundled repo (task dir has its own repo/ and champion/) — copy
+#      those. This is the path the bundled task-sella takes: it ships
+#      repo/algo.py (the editable baseline) and champion/ (the seed champion).
+#   2. Fallback: no bundled repo/ — agents work from a template repo/ if one
+#      exists, otherwise from scratch.
 #
-import json as _json
-import subprocess as _subprocess
-
 _task_has_repo = (TEMPLATE_DIR / task_source / "repo").is_dir()
 _task_has_champion = (TEMPLATE_DIR / task_source / "champion").is_dir()
 
-if IS_BENCHMARK:
-    # Agents build their own solution; nothing to pre-populate.
-    pass
-
-elif _task_has_repo:
+if _task_has_repo:
     # Copy the task's own repo/ into the run (not a shared mutable reference).
     _repo_src = TEMPLATE_DIR / task_source / "repo"
     shutil.copytree(_repo_src, RUN_DIR / "repo", symlinks=False,
@@ -435,76 +401,32 @@ elif _task_has_repo:
         (RUN_DIR / "champion").mkdir(exist_ok=True)
 
 else:
-    # Default: create an ISOLATED, VERIFIED-PRISTINE repo/ via git clone.
-    #
-    # Prior bug: repo/ used to be a symlink to a shared directory that accumulated
-    # working-tree modifications across runs. A new run would inherit ~1800 lines
-    # of uncommitted code from whatever the previous run left behind, and measure
-    # its "baseline" against that stale state. Every subsequent experiment was
-    # then anchored to a non-upstream starting point. To prevent this, every run
-    # now gets a fresh git clone of its upstream repo — no shared mutable state.
-    #
-    # Upstream URL + compat patches for the autoresearch benchmark.
-    _upstream_cfg = {
-        "url": "https://github.com/karpathy/autoresearch.git",
-        "depth": 1,
-        "compat_patches": [
-            # glibc 2.28 systems can't load varunneal/flash-attention-3 (needs 2.32).
-            # Fall back to kernels-community/flash-attn3 which works everywhere.
-            {
-                "file": "train.py",
-                "find": 'repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"',
-                "replace": 'repo = "kernels-community/flash-attn3"  # glibc compat — varunneal FA3 needs 2.32',
-            },
-        ],
-    }
-
-    _repo_url = _upstream_cfg.get("url")
-    if _repo_url:
-        _clone_dst = RUN_DIR / "repo"
-        _clone_cmd = ["git", "clone"]
-        if _upstream_cfg.get("depth"):
-            _clone_cmd += ["--depth", str(_upstream_cfg["depth"])]
-        _clone_cmd += [_repo_url, str(_clone_dst)]
-        _r = _subprocess.run(_clone_cmd, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE)
-        if _r.returncode != 0:
-            print(f"  ERROR: clone of {_repo_url} failed: {(_r.stderr or b'').decode(errors='replace').strip()}")
-            sys.exit(1)
-        print(f"  Cloned: repo/ <- {_repo_url}")
-
-        # Apply compat patches (e.g. kernel-fallback for glibc 2.28 hosts)
-        for _p in _upstream_cfg.get("compat_patches", []):
-            _target = _clone_dst / _p["file"]
-            if _target.exists():
-                _txt = _target.read_text()
-                if _p["find"] in _txt:
-                    _target.write_text(_txt.replace(_p["find"], _p["replace"]))
-                    print(f"    Patched: {_p['file']} (compat)")
-                else:
-                    print(f"    WARN: patch-find string not present in {_p['file']}")
-    elif (TEMPLATE_DIR / "repo").is_dir() or (TEMPLATE_DIR / "repo").is_symlink():
-        # Legacy fallback: copy (NOT symlink) the template's repo into the run.
+    # Fallback: the task shipped no repo/. If the template carries a repo/,
+    # copy (NOT symlink) it into the run so every run gets an isolated working
+    # tree — no shared mutable state across runs. Otherwise agents work from
+    # scratch.
+    if (TEMPLATE_DIR / "repo").is_dir() or (TEMPLATE_DIR / "repo").is_symlink():
         repo_src = TEMPLATE_DIR / "repo"
         if repo_src.is_symlink():
             repo_src = repo_src.resolve()
         shutil.copytree(repo_src, RUN_DIR / "repo", symlinks=False,
                         ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__", "*.pyc"))
-        print(f"  Copied: repo/ from {repo_src} (legacy fallback)")
+        print(f"  Copied: repo/ from {repo_src} (template fallback)")
     else:
         print(f"  NOTE: No repo/ source found in template. Agents will work from scratch.")
 
     (RUN_DIR / "champion").mkdir(exist_ok=True)
 
-    # Seed champion/ with the fresh repo's train.py so agents have a real baseline
-    # to copy from on their first cycle. Without this, champion/train.py starts
+    # Seed champion/ with the repo's algo.py so agents have a real baseline to
+    # copy from on their first cycle. Without this, champion/algo.py starts
     # empty and the first agent has to discover where the code lives.
-    _repo_train = RUN_DIR / "repo" / "train.py"
-    if _repo_train.exists():
-        shutil.copy2(_repo_train, RUN_DIR / "champion" / "train.py")
+    _repo_algo = RUN_DIR / "repo" / "algo.py"
+    if _repo_algo.exists():
+        shutil.copy2(_repo_algo, RUN_DIR / "champion" / "algo.py")
         (RUN_DIR / "champion" / "SOURCE").write_text(
-            f"pristine upstream clone, populated {datetime.now(timezone.utc).isoformat()}\n"
+            f"template repo/algo.py, populated {datetime.now(timezone.utc).isoformat()}\n"
         )
-        print(f"  Seeded: champion/train.py <- repo/train.py (pristine)")
+        print(f"  Seeded: champion/algo.py <- repo/algo.py")
 
 # Symlink .cache (shared training caches)
 cache_src = TEMPLATE_DIR / ".cache"
@@ -609,12 +531,10 @@ def setup_agent(name, desc, role, server, gpu):
     # AGENT.md — the agent's identity file (like CLAUDE.md)
     agent_md_path = agent_dir / "AGENT.md"
     if not agent_md_path.exists():
-        if role == "cpu":
-            gpu_line = "CPU-eval agent — evaluates candidate algo.py on the remote eval pool."
-        elif role == "gpu":
-            gpu_line = f"GPU agent on GPU {gpu}."
+        if role in ("cpu", "gpu"):  # "gpu" is a legacy alias for the CPU-eval role
+            role_line = "CPU-eval agent — evaluates candidate algo.py on the remote eval pool."
         else:
-            gpu_line = f"{role.title()} agent."
+            role_line = f"{role.title()} agent."
         agent_md_path.write_text(f"""---
 name: {name}
 role: {role}
@@ -631,7 +551,7 @@ last_fitness: null
 
 # {name}
 
-{gpu_line}
+{role_line}
 
 ## Current Focus
 (not yet assigned to a team)
@@ -967,7 +887,7 @@ No monitor intervention is required.
     print("  Launch complete!")
     print("=" * 60)
     program_file = "runbook.md"
-    task_type_label = "biomlbench" if IS_BENCHMARK else ("proteingym" if IS_PROTEINGYM else "optimization")
+    task_type_label = _task_type
     print(f"""
   Experiment dir: {ROOT}
   Workshop:      {WORKSHOP_NAME}

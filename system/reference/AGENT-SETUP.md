@@ -71,7 +71,7 @@ status: idle
 session_count: 0
 last_experiment: null
 last_outcome: null
-last_val_bpb: null
+last_fitness: null
 ---
 
 # ar2_cpu1

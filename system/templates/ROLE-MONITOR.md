@@ -93,26 +93,27 @@ differs is the **lens** through which they evaluate proposals.
 
 Hypothesis templates (pick 3 that fit the task):
 
-- **H-throughput:** "Model is undertrained at the current compute
-  budget. Any change that increases effective optimizer steps will
-  improve the metric."
-- **H-gradient-quality:** "Gradient signal per step is suboptimal.
-  Changes that reduce gradient noise or improve update direction will
-  improve the metric."
-- **H-capacity:** "The model's parametric capacity or representational
-  structure limits the metric. Structural changes will help more than
-  tuning."
-- **H-schedule-shape:** "The current learning-rate / weight-decay
-  schedule wastes budget in one phase. Redistributing will help."
+- **H-step-size:** "The optimizer takes too-conservative steps. A
+  bolder step rule / trust region will reach convergence in fewer
+  force calls without tripping the energy gate."
+- **H-curvature:** "The search direction is poorly conditioned. Better
+  Hessian initialization or preconditioning will cut force calls per
+  molecule."
+- **H-line-search:** "Force calls are wasted inside the line search /
+  backtracking. A cheaper or smarter acceptance rule will reduce
+  total force calls."
+- **H-convergence-gate:** "The convergence test stops too late (wasted
+  calls) or too early (energy gate failures). Retuning the stopping
+  criterion will improve fitness while staying valid."
 - **H-hidden-constant:** "A specific hardcoded numeric constant
-  (non-obvious in the config block) is badly chosen. Changing it
-  will yield a large |Δ|."
+  (non-obvious in `minimize_func`) is badly chosen. Changing it
+  will yield a large |Δ| in fitness."
 
 Each team's `strategy.md` MUST include these fields in the frontmatter:
 
 ```yaml
-hypothesis: H-throughput
-prediction: "Experiments that increase num_steps by ≥10% will KEEP"
+hypothesis: H-step-size
+prediction: "Experiments that raise the max step / trust radius cut mean_rel_steps ≥5% and stay valid will KEEP"
 falsification: "If 3 rotations of prediction-consistent experiments all DISCARD, hypothesis is falsified"
 age_rotations: 0
 supported_keeps: 0
@@ -129,8 +130,8 @@ refuted_discards: 0
 - Teams that produce KEEPs are "hot" — their supported_keeps increments
   and the queue ranker gives their subsequent proposals priority.
 - Teams do NOT have axis ownership. The old "stay within your
-  dimension" rule is abolished. A CPU-eval agent on H-gradient-quality may
-  claim a WARMDOWN_RATIO experiment if the team's hypothesis predicts
+  dimension" rule is abolished. A CPU-eval agent on H-curvature may
+  claim a line-search experiment if the team's hypothesis predicts
   it will KEEP.
 
 See `system/reference/PHASES.md` Phase 2 for the `create_team()` helper.

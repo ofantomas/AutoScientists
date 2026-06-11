@@ -443,7 +443,7 @@ import re, json
 from pathlib import Path
 
 # 1. Extract ALL named numeric assignments from champion code
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 
 # Layer 1: Top-level named constants (UPPER_CASE = value)
 layer1 = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)\s*[:=]\s*([0-9]+\.?[0-9]*)", re.MULTILINE)
@@ -652,12 +652,25 @@ analysts enact the merge — so the enactor is explicitly NOT required to be aff
 
 If none of the conditions hold, this step is a no-op — proceed to Step 1e.
 
-### Step 1e — Compute-Budget Audit — N/A for this task
+### Step 1e — Per-Molecule Diagnostics — analyze before proposing
 
-This task has no compute-budget-scaling axis: evaluation is a fixed, deterministic
-relaxation of a fixed molecule set — there is no model size, batch size, sequence
-length, or hardware-utilization knob to scale into. Nothing to audit here; this
-step is a no-op. Proceed to Step 2.
+`fitness` (`mean_rel_steps`) averages over 250 molecules and hides where the optimizer
+actually struggles. Every eval result carries a `per_molecule` summary (in the score JSON /
+`results/<exp_id>.md`): for the worst molecules it lists `rel_steps` (steps vs baseline) and
+`energy_delta_kcal_mol` (headroom to the 1.0 kcal/mol validity gate), plus any `non_converged`.
+Read it for the champion and recent candidates, and let it shape your proposals:
+
+- **`worst_by_rel_steps`** — molecules far above baseline steps are where the budget is spent.
+  Target mechanisms (step control, curvature model, line search, convergence criterion) that
+  help THAT regime, not the average.
+- **`nearest_energy_gate`** — molecules with `energy_delta_kcal_mol` near 1.0 are near-invalid;
+  an aggressive step/accept change that lowers mean steps but pushes these over the gate will be
+  DISCARDed. Note the tension in the proposal.
+- **`non_converged`** — molecules that hit `max_steps` are a distinct failure class; a proposal
+  that fixes convergence there can KEEP without touching the easy molecules.
+
+Name the molecule regime your proposal targets and the per-molecule signal motivating it.
+Proceed to Step 2.
 
 ### Step 2 — Prune Dead Ends
 
@@ -733,7 +746,7 @@ team_hits = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/search?q={mechanism_key
 # If the mechanism family has 3+ DISCARDs, do NOT propose variations of it
 
 # 3. CHECK THE CHAMPION CODE — the mechanism may already be implemented!
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 if mechanism_keyword.lower() in champion_code.lower():
     print(f"SKIP: {mechanism_keyword} already exists in champion code!")
     # Do NOT propose — find something genuinely new instead
@@ -757,7 +770,7 @@ if "PATTERN:FALSIFIED" in de_content:
 Include in your [PROPOSAL] post:
 - **Prior results:** list any related experiments and their outcomes
 - **Why this is different:** explain what distinguishes this from prior attempts
-- **Verified not in champion code:** confirm you checked train.py
+- **Verified not in champion code:** confirm you checked algo.py
 - **No EXPERIMENT_ID gating:** the proposed diff must be unconditional — never gate behind `if EXPERIMENT_ID == "exp_foo"`. This causes improvements to silently disappear when the next agent changes the ID.
 - **Confidence:** high/medium/low with expected delta range
 
@@ -793,7 +806,7 @@ been implemented as part of a later champion update, or may reference
 variables that no longer exist.
 
 ```python
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 for item in shortlist:
     # Grep for each distinctive token from the item description
     if all(tok.lower() in champion_code.lower() for tok in item.key_tokens):
