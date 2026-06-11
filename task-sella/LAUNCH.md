@@ -142,11 +142,11 @@ For each cpu-eval agent, launch in its own message:
 ```python
 eval_agents = [f"{PREFIX}_gpu{i}" for i in range(1, 7)]
 
-# Smoke run: dispatch only the FIRST 2 agents (eval_agents[:2]) to confirm the
-# eval-head host, Redis, and worker pool are healthy and the baseline algo.py
-# evaluates end-to-end before scaling to the full roster.
-# On cold start, dispatch agent #1 as soon as the first queue is seeded (don't
-# wait for analysts to finish their cycle).
+# Dispatch all 6 cpu-eval agents every cycle (the full roster).
+#
+# Cold start: as soon as teams form, immediately dispatch one cpu-eval agent in
+# MODE=execute to run the shared baseline, before extended discussion; then
+# dispatch the rest against the seeded queues.
 
 for agent_name in eval_agents:
     Task(
@@ -274,12 +274,19 @@ means no real improvement was found, not an unlucky run of seeds.
 
 ## Hook: periodic_hooks
 
-**NO-OP.** There is no meta-improvement step for this task. `meta_diagnostics` is **not shipped** with
-this harness, so do NOT import it and do NOT attempt to edit role templates programmatically.
+**Meta-improvement: ENABLED.** Every 3 cycles, follow `system/reference/META-IMPROVEMENT.md`: read
+the evidence, make ONE targeted file edit, append a line to `logs/meta_results.tsv`. Do NOT
+`import meta_diagnostics` (not shipped). Optionally run `python3 task/meta_diagnostics.py` for hard
+signals (crash-safe; the pass works without it).
 
 ```python
 def periodic_hooks(cycle_count):
-    return None   # no periodic meta-improvement; meta_diagnostics is not available
+    if cycle_count % 3 != 0:
+        return None
+    # Judgment-based meta-improvement — see system/reference/META-IMPROVEMENT.md.
+    # Read evidence -> diagnose the single biggest issue -> edit exactly ONE file
+    # -> append to logs/meta_results.tsv. NEVER import meta_diagnostics.
+    return None
 ```
 
 ---
