@@ -270,52 +270,16 @@ gets evaluated through your team's LENS — does it support your
 hypothesis? Different teams may propose the same axis for different
 reasons; that is the intended form of collective reasoning.
 
-### Step 0.5 — Lazy Noise-Floor Calibration — REQUIRED
+### Step 0.5 — Deterministic Evaluation (No Noise Floor) — NOTE
 
-Do NOT queue upfront baseline_seed probes. They consume experiments
-before any real search has happened. Instead, noise data accumulates
-passively from the GPU multi-seed gate (Step 7.0): every time a
-borderline KEEP triggers a second-seed re-run, the resulting (code_hash,
-metric_a, metric_b) point is appended to
-`knowledge/noise_floor_data.md` in the main workspace.
-
-Before applying any near-miss or promotion rule, read it:
-
-```python
-nf_data_raw = requests.get(
-    f"{API}/workspaces/{MAIN_WS_ID}/files/knowledge/noise_floor_data.md",
-    headers=HEADERS).json()
-points = parse_pairs(nf_data_raw.get("content", ""))  # list of (a, b) for same code
-
-if len(points) >= 3:
-    diffs = [abs(a - b) for a, b in points]
-    sigma = statistics.stdev([x for ab in points for x in ab])  # or pooled σ
-    mde = 2 * sigma
-else:
-    # Insufficient data — use a conservative default band
-    sigma = None
-    mde = 0.003  # conservative until data accumulates
-```
-
-**Rules when no empirical noise floor exists yet:**
-
-- Use the conservative band (|Δ| < 0.003) — do NOT close axes inside it.
-- The multi-seed gate in GPU Step 7.0 will supply data organically as
-  experiments fire; don't pay experiments for measurement you'll get
-  for free.
-- Once n≥3 pairs exist in `noise_floor_data.md`, σ is the empirical
-  pooled-seed std and the conservative default retires.
-
-**Lock rule (REQUIRED).** Once n ≥ 5 pairs have been collected, the
-noise floor is LOCKED. Later pairs update σ only as a smoothed
-average; they do NOT retroactively reclassify existing DISCARDs.
-Reason: observed in prior runs, late analysts kept re-declaring σ,
-reopening and reclosing the same "closed" axes. Rule: after lock, σ
-is a running estimate for NEW experiments only. Prior DISCARDs stay
-DISCARD regardless of σ drift.
-
-Write a single boolean flag in `knowledge/noise_floor.md` frontmatter:
-`locked: true` once n≥5, and include the value of σ at lock time.
+Evaluation is deterministic (sigma=0, verified end-to-end): re-running
+the same code produces the identical metric. There is no measurement
+noise floor, no near-miss band, and no multi-seed confirmation. Any
+strictly-better valid result is real. Do NOT queue baseline_seed /
+noise-floor probes, do NOT read or maintain `noise_floor.md` /
+`noise_floor_data.md`, and do NOT apply a noise band when deciding
+whether a delta is signal. A non-improving valid delta is simply a
+DISCARD; an improving valid delta is a KEEP.
 
 ### Step 0.7 — Discussion-Backlog Ledger — REQUIRED
 
@@ -390,62 +354,17 @@ results = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/search?q={MY_TEAM}",
 
 Analyze: which mechanisms worked? Which families have 3+ DISCARDs?
 
-### Step 1a — Noise Floor Rule — REQUIRED
+### Step 1a — Deterministic Deltas (No Near-Miss Band) — NOTE
 
-Every evaluation metric has a measurement noise floor — repeated runs of the
-same config produce slightly different scores. A single "near-miss" DISCARD
-whose delta is inside that noise band is **indistinguishable from having
-changed nothing**. It is NOT a gradient, NOT a signal, and does NOT justify a
-follow-up fine-bracket experiment.
-
-**You MUST read the current empirical noise floor from
-`knowledge/noise_floor.md` (team-local) or the main-workspace canonical
-noise file before applying this rule.** Do NOT use hardcoded thresholds.
-If the file does not exist, the noise floor is unknown and you must not
-close any axis on single-sample evidence; instead, post a `[SUGGESTION]`
-requesting a seed-variance infrastructure probe and treat all recent
-near-miss DISCARDs as "axis remains open, not enough data." Once the
-file exists, the meaningful quantities for this rule are the composite
-1σ (combining cross-seed and same-seed components, if known) and the 2σ
-and 4σ multiples of it — use those as the near-miss band, not any
-historical fixed number.
-
-Rules when auditing recent DISCARDs against that band:
-
-- **Delta inside the noise band, only 1 data point on the axis:**
-  - Do NOT add the axis to `dead_ends.md` — it is still open
-  - Do NOT propose a fine-bracket follow-up from this single point
-  - Require **at least 2 data points** on the axis before either action
-- **Delta clearly outside the noise band (positive or negative):** treat as
-  real signal and proceed normally
-- **2+ DISCARDs inside the noise band pointing opposite directions:** the
-  axis is flat in this neighborhood — close it in `dead_ends.md` as "flat,
-  no gradient"
-
-**Far / opposite probe rule (extends the above):** when a single near-miss
-is your ONLY signal on an axis, the next proposal on that axis must be
-either (a) a **far probe** — a value much further from the current optimum
-than the near-miss — or (b) an **opposite-direction probe** — a value on
-the other side of the current optimum. Do NOT propose a fine-bracket
-half-way between the current optimum and the near-miss. Fine-brackets are
-only legitimate after a 2-point monotone trend has already been
-established. This rule prevents near-miss avalanches where each
-fine-bracket re-confirms noise and closes nothing.
-
-**Bracketed-minimum pre-refinement check:** before approving ANY fine-bracket
-refinement around a bracketed minimum, compute `best_observed_delta - 0`
-and compare it to the noise floor. **If the best bracketed delta is
-already above the noise band, refining the bracket cannot reach a KEEP** —
-the axis is arithmetically exhausted even though the shape looks
-"interesting". Close the axis in `dead_ends.md` instead of spending another
-slot on a refinement that can at best re-confirm the shallow trough.
-A 3-point bracket whose minimum is already above noise-band is a closed
-axis, not a candidate for a 4th point.
-
-**Why this matters:** without a noise-floor check, near-misses trigger
-fine-bracket follow-ups that mostly re-confirm noise, consuming GPU budget
-while adding no information. Enforce the rule even when a result "feels
-close" to a KEEP.
+Evaluation is deterministic (sigma=0): any strictly-better valid result is
+real and any recorded delta is exact. There is no measurement noise floor
+and no near-miss band — do NOT treat a small non-improving delta as
+"indistinguishable from no change," do NOT read `noise_floor.md`, and do
+NOT require multiple data points on an axis to trust a delta. A DISCARD
+delta is the true response at that point; a KEEP is a true improvement.
+Fine-bracket refinement is still a legitimate search move where the shape
+warrants it — judge it on whether the trend can plausibly reach a strict
+improvement, not on a noise band.
 
 ### Step 1b — KEEP Followup Harvest — REQUIRED
 
@@ -791,7 +710,7 @@ search. This step breaks out of it.
 **Task-portability note:** the exact thresholds (70% memory, 50%
 compute) are defaults. If your task or hardware has a different
 practical utilization target, record the correct thresholds in
-`teams/noise_floor.md` or `task/TASK.md` and read them here instead.
+`task/TASK.md` and read them here instead.
 The principle — "if the budget isn't binding, scale-up is your
 highest-priority probe" — applies regardless of the specific
 numbers.
@@ -803,17 +722,9 @@ Rules: **3+ DISCARDs, 0 KEEPs** → dead end. **2 DISCARDs, 0 KEEPs** → downgr
 **You MUST write dead_ends.md to the team workspace** when a family is ruled out. Other agents
 discover it via LIST and skip those families in their dedup check.
 
-**Noise-contamination re-triage (REQUIRED).** Before adding new entries,
-walk the existing `dead_ends.md` and mark any entry whose recorded
-|delta| is smaller than the team's **current** measured noise floor as
-`NOISE-CONTAMINATED — axis remains open`. Do NOT delete these entries;
-downgrade them so the baseline coverage audit (Step 1c) can find them as
-legitimate targets again. Many closures written under earlier
-(speculative) noise-floor estimates no longer pass the real-data bar,
-and those closures have been narrowing the search space artificially.
-Flushing contaminated entries over successive rotations restores the
-productive surface area without losing institutional memory about
-which experiments were run.
+Because evaluation is deterministic (sigma=0), recorded DISCARD deltas are
+exact — do NOT re-triage existing dead_ends as "noise-contaminated." A
+closed axis stays closed on its real measured deltas.
 
 ```python
 import yaml as _yaml
@@ -988,15 +899,16 @@ Write the full table to `knowledge/axis_priors.md`:
 ```
 axis           | direction | n | mean_|Δ| | status
 warmdown_ratio | increase  | 0 |    -     | COLD (exploration bonus)
-warmdown_ratio | decrease  | 5 |  0.0008  | flat (below 2σ)
+warmdown_ratio | decrease  | 5 |  0.0008  | flat (small |Δ|)
 embedding_lr   | increase  | 1 |  0.0042  | COLD
 ...
 ```
 
 **Use this ranking in Step 5:** high mean |Δ| axes go first; cold
-axes get exploration bonus (also front of queue); axes with mean |Δ|
-below the current noise floor get deprioritized unless they satisfy
-the ambition quota.
+axes get exploration bonus (also front of queue). Evaluation is
+deterministic, so there is no noise floor — do not deprioritize axes
+on a noise-band basis; rank purely on empirical |Δ| and cold-axis
+exploration bonus.
 
 ### Step 3.4 — Bracket Rule for Cold Numeric Axes — REQUIRED
 
@@ -1028,7 +940,7 @@ refinement probe is enough.
   single-value proposals.
 - Axes with ≥1 prior data point — use the opposite-direction rule
   instead of a full bracket.
-- Infrastructure probes (baseline, noise floor pairs).
+- Infrastructure probes (e.g. baseline).
 
 **Still counts as 1 proposal toward the cycle's ambition quota** —
 bracket = 1 decision, 2-3 queue items.
@@ -1142,13 +1054,13 @@ strong claim and should be backed by specific evidence (exhaustion of
 the bold-move categories above, not just "my team is tired").
 
 **Why this rule exists:** absent an explicit ambition quota, the
-default proposal shape trends toward small, safe, noise-floor-adjacent
+default proposal shape trends toward small, safe, marginal
 probes. Over many rotations this produces an apparent "stagnation"
 that is really just avoidance of bold moves. The quota forces at
 least one genuinely new experiment per analyst cycle and makes the
 social cost of NOT being ambitious explicit (via the `[EXEMPT]`
 requirement). It is orthogonal to all other steps — you can satisfy
-it using proposals that still pass noise-floor, dedup, pattern-
+it using proposals that still pass dedup, pattern-
 reference, and team-structure rules.
 
 ```python
@@ -1276,7 +1188,8 @@ if exp_id not in existing_ids:
     #   information per experiment
     # - COLD axes (n<3) get exploration bonus next
     # - Other axes sorted by mean |Δ| descending
-    # - Proposals inside the current noise band go last
+    # (Evaluation is deterministic — no noise band, so nothing is
+    #  pushed to the back on a below-noise basis.)
     from collections import Counter
     axis_dir_counts = Counter(
         (it.get("axis"), it.get("direction")) for it in pending if it.get("axis")
@@ -1295,8 +1208,7 @@ if exp_id not in existing_ids:
         if key in cold_axes:
             return (0, 0)      # exploration bonus
         score = axis_scores.get(key, 0)
-        below_noise = score < float(noise_floor_sigma or 0)
-        return (2 if below_noise else 1, -score)
+        return (1, -score)
     pending.sort(key=_rank)
 
     updated_fm = {"claims": claims, "pending": pending}
@@ -1326,7 +1238,7 @@ for n in notifs.get("data", []):
     post = requests.get(f"{API}/posts/{post_id}", headers=HEADERS).json()
     title = post.get("title", "")
     # Reply if you have something substantive to add (not just acknowledgement)
-    # Priority: [NEAR-MISS] follow-ups, [DISCUSSION] threads, replies to your [PROPOSAL]s
+    # Priority: [DISCUSSION] threads, replies to your [PROPOSAL]s
     print(f"Notification: {title[:80]}")
 ```
 

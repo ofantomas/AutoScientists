@@ -556,14 +556,18 @@ if len(PREFIX) > 16:
     PREFIX = PREFIX[:6] + PREFIX[-10:]
 
 # Agent roster: name -> (description, role, server, gpu)
+# NOTE: the `_gpuN` agent NAMES are retained (LAUNCH.md gpu_dispatch / periodic_hooks
+# reference `f"{PREFIX}_gpu{i}" for i in range(1, 7)`), but for the sella CPU-eval task
+# their role is "cpu" and they carry no device index (gpu = -1). The "cpu" role loads the
+# converted (CPU-eval) ROLE-GPU.md via role_file_map below.
 AGENTS = {
     f"{PREFIX}_monitor":    ("Focus area monitor — bootstraps, forms teams, monitors health",   "monitor",   "server1", -1),
-    f"{PREFIX}_gpu1":     ("GPU agent 1 — runs experiments on GPU 0",                       "gpu",     "server1",  0),
-    f"{PREFIX}_gpu2":     ("GPU agent 2 — runs experiments on GPU 1",                       "gpu",     "server1",  1),
-    f"{PREFIX}_gpu3":     ("GPU agent 3 — runs experiments on GPU 0",                       "gpu",     "server2",  0),
-    f"{PREFIX}_gpu4":     ("GPU agent 4 — runs experiments on GPU 1",                       "gpu",     "server2",  1),
-    f"{PREFIX}_gpu5":     ("GPU agent 5 — runs experiments on GPU 0",                       "gpu",     "server3",  0),
-    f"{PREFIX}_gpu6":     ("GPU agent 6 — runs experiments on GPU 1",                       "gpu",     "server3",  1),
+    f"{PREFIX}_gpu1":     ("CPU-eval agent 1 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_gpu2":     ("CPU-eval agent 2 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_gpu3":     ("CPU-eval agent 3 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_gpu4":     ("CPU-eval agent 4 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_gpu5":     ("CPU-eval agent 5 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
+    f"{PREFIX}_gpu6":     ("CPU-eval agent 6 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
     f"{PREFIX}_analyst1": ("Analyst 1 — researches mechanisms, proposes experiments",        "analyst", "server1", -1),
     f"{PREFIX}_analyst2": ("Analyst 2 — researches mechanisms, proposes experiments",        "analyst", "server2", -1),
     f"{PREFIX}_analyst3": ("Analyst 3 — researches mechanisms, proposes experiments",        "analyst", "server3", -1),
@@ -605,7 +609,12 @@ def setup_agent(name, desc, role, server, gpu):
     # AGENT.md — the agent's identity file (like CLAUDE.md)
     agent_md_path = agent_dir / "AGENT.md"
     if not agent_md_path.exists():
-        gpu_line = f"GPU agent on GPU {gpu}." if role == "gpu" else f"{role.title()} agent."
+        if role == "cpu":
+            gpu_line = "CPU-eval agent — evaluates candidate algo.py on the remote eval pool."
+        elif role == "gpu":
+            gpu_line = f"GPU agent on GPU {gpu}."
+        else:
+            gpu_line = f"{role.title()} agent."
         agent_md_path.write_text(f"""---
 name: {name}
 role: {role}
@@ -617,7 +626,7 @@ status: idle
 session_count: 0
 last_experiment: null
 last_outcome: null
-last_val_bpb: null
+last_fitness: null
 ---
 
 # {name}
@@ -646,6 +655,7 @@ last_val_bpb: null
     # Inject role-specific content
     role_file_map = {
         "gpu": "ROLE-GPU.md",
+        "cpu": "ROLE-GPU.md",   # CPU-eval agents use the converted (CPU-eval) ROLE-GPU.md
         "analyst": "ROLE-ANALYST.md",
         "monitor": "ROLE-MONITOR.md",
     }
@@ -677,8 +687,9 @@ last_val_bpb: null
 
     (agent_dir / "HEARTBEAT.md").write_text(heartbeat)
 
-    # Copy training repo for GPU agents (optional - only if repo exists)
-    if role == "gpu":
+    # Copy the baseline code repo for experiment-running agents (GPU or CPU-eval),
+    # optional - only if a repo source exists.
+    if role in ("gpu", "cpu"):
         dst = agent_dir / "workspace" / "repo"
         repo_source = None
 
@@ -690,6 +701,11 @@ last_val_bpb: null
             task_repos = list(TASK_DIR.glob("repo-*"))
             if task_repos:
                 repo_source = task_repos[0]
+            # Pattern 3: Sella CPU-eval - a plain task/repo/ directory shipped with the
+            # task (algo.py-centric; champion ships alongside). The eval head holds the
+            # evaluator, so all we need locally is the editable algo.py baseline.
+            elif (TASK_DIR / "repo").exists():
+                repo_source = TASK_DIR / "repo"
 
         # Copy baseline code to agent workspace if found
         if repo_source:
@@ -888,7 +904,7 @@ Teams formed during Phase 2 discussion.
     problem_section = task_body.split("\n## ")[0].strip()  # First section before next ##
 
     kickoff = requests.post(f"{API}/posts", headers=HEADERS, json={
-        "submolt": WORKSHOP_NAME,
+        "workshop": WORKSHOP_NAME,
         "title": "[DISCUSSION-TRIGGER] Cold-start bootstrap — form hypothesis-based teams",
         "content": f"""# Cold-Start Bootstrap
 

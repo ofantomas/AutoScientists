@@ -1,18 +1,18 @@
 ---
-name: multi-agent-focus-gpu
-description: GPU agent protocol — claim from team queue, train, record results
+name: multi-agent-focus-cpu-eval
+description: CPU-eval agent protocol — claim from team queue, evaluate candidate algo.py on the remote eval pool, record results
 ---
 
-# GPU Agent Protocol
+# CPU-Eval Agent Protocol
 
 **STOP. Did you go through HEARTBEAT Part 0 first?** If not, go back. This file is only for agents who have been routed into Part 4 (Normal Cycle) by the Mode Selector. If the Mode Selector sent you to Part 2 (Discussion) or Part 3 (No-Team), do NOT read or execute this file — follow that branch instead.
 
-You run experiments on a dedicated GPU. You belong to a team.
+You evaluate candidate optimizers on a **remote, deterministic, CPU-only** eval pool (a Redis-backed distributed validation worker pool on the eval-head host). There is no GPU and no CUDA anywhere in your workflow. You belong to a team.
 
 ## Two rules that override everything below
 
 1. **No team → no work.** Enforced by HEARTBEAT Part 0. If you reach this file, `MY_TEAM` is set.
-2. **Every experiment MUST have a complete AnonAPI API trail:** POST [PROPOSAL] → add to queue → claim → train → write result file → release claim → POST [RESULT]. If KEEP, also PUT champion.md. This applies whether the experiment came from an analyst's queue or you self-designed it. Skip any step → invisible work → forbidden.
+2. **Every experiment MUST have a complete AnonAPI API trail:** POST [PROPOSAL] → add to queue → claim → evaluate → write result file → release claim → POST [RESULT]. If KEEP, also PUT champion.md. This applies whether the experiment came from an analyst's queue or you self-designed it. Skip any step → invisible work → forbidden.
 
 ## CRITICAL: YAML Frontmatter Parsing
 
@@ -55,12 +55,14 @@ if MY_TEAM is None:
 
 **Do not** wrap this in a try/except that swallows the exit and continues. The only valid response to "no team" is to exit cleanly.
 
-### Step 1 — Check GPU Availability
+### Step 1 — Eval Pool Availability
 
-```bash
-nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits
-```
-If >1000 MiB used on your GPU → do analyst work instead.
+Evaluation is deterministic and CPU-only — there is no single device to contend for. The eval pool
+is the remote Redis-backed distributed validation worker pool on the eval-head host; concurrency is
+bounded by the worker count, not by a device. You do **not** need to check `nvidia-smi` (there is no
+GPU). If your `scp`/`ssh` to the eval head fails or the eval call blocks past its timeout (no healthy
+`xtb` workers serving Redis), treat that as an infrastructure problem: post a `[SUGGESTION]` flagging
+the eval head / worker pool and do analyst work instead this cycle.
 
 ### Step 1.5 — Shared-Baseline Coordination — REQUIRED
 
@@ -84,10 +86,10 @@ if champ.get("status") == "awaiting_baseline":
         # We got the lock — run champion unchanged as the shared baseline,
         # then seed champion.md for everyone.
         item = {"id": "baseline_shared",
-                "axis": "seed",
+                "axis": "baseline",
                 "direction": "none",
                 "value": 0,
-                "diff": "Run champion train.py unchanged (shared baseline)",
+                "diff": "Evaluate champion algo.py unchanged (shared baseline)",
                 "infrastructure_probe": True}
     else:
         # Someone else holds the lock — skip baseline, proceed to real
@@ -109,146 +111,25 @@ champ_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
 champ = parse_frontmatter(champ_raw)
 champ_version = champ_raw.get("version", 0)  # Save for race condition check later
 
-# Read canonical champion train.py (SINGLE SOURCE OF TRUTH)
-# Located at: {FOCUS_ROOT}/champion/train.py
-# Copy it AND its runtime dependencies to your workspace before making changes.
-#
-# Copying only train.py is the #1 first-launch failure in this role:
-# `uv run python train.py` will ModuleNotFoundError on `prepare.py` (or fail
-# the `pyproject.toml` lookup, or pick a wrong dependency version without
-# `uv.lock`). Both gpu5 and gpu6 hit this on 2026-05-26 — the auto-recovery
-# costs 30-60s per agent and burns API budget. Just copy them all.
+# Read canonical champion algo.py (SINGLE SOURCE OF TRUTH)
+# Located at: {FOCUS_ROOT}/champion/algo.py
+# Copy it to your workspace before making changes. `algo.py` is the ONLY file
+# you edit and the ONLY file the evaluator needs — there is no prepare.py /
+# pyproject.toml / uv.lock for this task. The evaluator (eval_candidate.py,
+# validate.py, molecules/, metrics.yaml) lives in the sella checkout on the
+# remote eval head; you never copy it locally.
 import shutil
 from pathlib import Path
 workdir = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
 workdir.mkdir(parents=True, exist_ok=True)
-for fname in ("train.py", "prepare.py", "pyproject.toml", "uv.lock"):
-    src = Path(f"{FOCUS_ROOT}/champion") / fname
-    if not src.exists():
-        # Fallback to task/repo/ for files that aren't champion-tracked
-        # (champion only tracks files that diff per experiment).
-        src = Path(f"{FOCUS_ROOT}/task/repo") / fname
-    shutil.copy(src, workdir / fname)
+src = Path(f"{FOCUS_ROOT}/champion/algo.py")
+if not src.exists():
+    # Fallback to the task's shipped baseline algo.py.
+    src = Path(f"{FOCUS_ROOT}/task/repo/algo.py")
+shutil.copy(src, workdir / "algo.py")
 ```
 
-**Never read train.py from another agent's workspace.** Always use `{FOCUS_ROOT}/champion/train.py`.
-
-### Step 2a — Biomlbench Experiment Priorities — READ IF BIOMLBENCH=true
-
-If `BIOMLBENCH=true`, read this section in full before claiming or self-designing any experiment.
-
-#### 2a-i. Register your approach (REQUIRED at start of every cycle)
-
-Before you claim or design an experiment, register your intended approach in the shared
-approach registry so other agents don't duplicate it:
-
-```python
-import json, fcntl
-from pathlib import Path
-
-reg_path = Path(f"{FOCUS_ROOT}/logs/approach_registry.json")
-MY_APPROACH = "<one-line label, e.g. 'chemprop-GNN' or 'ChemBERTa-finetune' or 'Mordred+RF'>"
-
-# Atomic read-modify-write with file lock
-with open(reg_path, "r+") as f:
-    fcntl.flock(f, fcntl.LOCK_EX)
-    reg = json.load(f)
-    taken = reg.get("taken", [])
-    if MY_APPROACH in taken:
-        print(f"APPROACH CONFLICT: '{MY_APPROACH}' already taken — pick a different paradigm")
-        # Choose a different approach and repeat this check before proceeding
-    else:
-        taken.append(MY_APPROACH)
-        reg["taken"] = taken
-        f.seek(0); json.dump(reg, f, indent=2); f.truncate()
-        print(f"Registered approach: {MY_APPROACH}  (registry now: {taken})")
-    fcntl.flock(f, fcntl.LOCK_UN)
-```
-
-If `approach_registry.json` does not exist yet, create it:
-```python
-reg_path.write_text(json.dumps({"cycle": 1, "taken": [MY_APPROACH]}, indent=2))
-```
-
-**Do not proceed with training if another agent has already registered the same approach
-this cycle.** Pick a different paradigm and re-register.
-
-#### 2a-ii. Declare your compute mode — REQUIRED if GPU_AVAILABLE=True
-
-After registering your approach and **before starting any training**, write a one-line file
-declaring whether your experiment needs the GPU or can run on CPU only. The orchestrator
-polls this file to decide whether to serialize or parallelize the next agent.
-
-```python
-# Determine compute mode based on your chosen approach
-MY_COMPUTE = "gpu"   # set to "cpu" if your experiment is CPU-only
-
-claim_path = Path(f"{FOCUS_ROOT}/logs/{AGENT_NAME}.gpu_claim")
-claim_path.write_text(MY_COMPUTE + "\n")
-print(f"[COMPUTE CLAIM] {AGENT_NAME}: {MY_COMPUTE}")
-```
-
-**Write this file as early as possible** — ideally right after approach registration, before
-you read the queue or write any code. The orchestrator waits up to 120 s for this file;
-if it doesn't appear, it assumes `gpu` and blocks the next agent unnecessarily.
-
-**GPU experiments** (write `gpu`): anything that calls `torch`, `tensorflow`, or a CUDA
-kernel — GNN training, transformer fine-tuning, neural network training. These serialize
-because only 1 GPU is available.
-
-**CPU experiments** (write `cpu`): classical ML (XGBoost, LightGBM, SVR, RF), Gaussian
-processes, AutoML (FLAML/TPOT), offline embedding inference followed by a linear head,
-any sklearn-based pipeline. These run in parallel with each other and with the active GPU
-agent — they add throughput at zero GPU cost.
-
-**Aim for a mix across the team each cycle.** If the approach registry already shows 2+
-GPU approaches registered, strongly prefer a CPU experiment for your slot (and vice versa).
-This keeps the GPU busy on deep models while CPU agents explore classical/ensemble methods
-simultaneously.
-
-#### 2a-iii. GPU vs CPU approach selection
-
-Read `GPU_AVAILABLE` from your launch prompt. It determines which method classes are practical.
-
-**If `GPU_AVAILABLE=True`** — strongly prefer GPU-native methods:
-
-| Domain | Preferred approaches |
-|--------|---------------------|
-| Small-molecule ADMET | Chemprop (MPNN), PyG/DGL GNN, ChemBERTa/MolBERT, UniMol, Graph Transformer |
-| Protein fitness | ESM-2 embeddings + head, MSA Transformer, Chemprop on SMILES if applicable |
-| Single-cell | scVI VAE, Geneformer/scGPT, GNN on cell graph, CLIP-style multimodal |
-| Pathology imaging | ViT/ResNet fine-tune, pathology FM (UNI, CONCH), nnU-Net |
-
-You can run pretrained foundation model embeddings for feature extraction and use them as features for a classical ML model.
-
-CPU-friendly methods (XGBoost+RDKit etc.) are fine as ONE fallback team — not as the
-default for every agent. If GPU is available and the queue only has classical ML entries,
-self-design a GPU-native experiment instead.
-
-**If `GPU_AVAILABLE=False` (CPU only)** — diversify across these CPU-friendly paradigms
-(do NOT all pick the same approach)
-
-Paradigms: LightGBM/XGBoost, SVR, RF/ExtraTrees, Gaussian Process, Offline pretrained foundation model embeddings 
-
-**Pick the paradigm your team was assigned in queue.md. If the queue is empty, pick the
-highest-value unclaimed paradigm NOT in the registry.**
-
-#### 2a-iv. Low-value experiment types to avoid
-
-The following have low expected value and should NOT be prioritized:
-
-1. **More HP search trials on an already-tuned model** — extra Optuna trials on the same
-   architecture tend to overfit the CV split on small datasets.
-2. **Fine-bracket sweeps of one regularization coefficient** — usually inside the CV noise band.
-3. **More ensemble seeds on an unchanged model** — reduces variance slightly but adds nothing new.
-4. **Single-parameter tuning of a model that's already had a tuning pass** — CV noise dominates.
-
-If the queue contains only these types, self-design something that meaningfully changes the
-approach. Post a [SUGGESTION] if you skip queued items so analysts can reprioritize.
-
-**Why this matters:** biomlbench tasks span small-molecule ADMET, protein fitness, single-cell
-genomics, and medical imaging — all with finite wall-clock budgets. The highest-value experiments
-test a qualitatively different approach, not re-tuning a model the team has already optimized.
+**Never read algo.py from another agent's workspace.** Always use `{FOCUS_ROOT}/champion/algo.py`.
 
 ### Step 2b — Verify Task Specifications
 
@@ -260,19 +141,10 @@ task_spec_path = f"{FOCUS_ROOT}/task/TASK.md"
 with open(task_spec_path) as f:
     task_content = f.read()
 
-# For BioML tasks (ProteinGym, TDC), verify the fold split specification
-if "fold_contiguous" in task_content:
-    # Ensure you use the correct fold column as specified in TASK.md
-    # Example check for ProteinGym:
-    import re
-    fold_match = re.search(r'fold_([a-z_]+5)', task_content)
-    if fold_match:
-        required_fold = fold_match.group(0)  # e.g., "fold_contiguous_5"
-        print(f"TASK VERIFICATION: Using split = {required_fold}")
-        # Verify your code uses this exact fold column before training
+# Confirm you understand the metric, the validity gate, and any constraints the
+# task spec imposes before applying a diff. Misreading the task requirements will
+# invalidate your results.
 ```
-
-**Why this matters:** Task specs may specify a particular data split (e.g., `fold_contiguous_5` instead of `fold_random_5`). Using the wrong split will invalidate all results.
 
 ### Step 3 — Claim Experiment from Team Queue (REQUIRED)
 
@@ -317,8 +189,8 @@ else:
 ```
 
 **Every experiment must have a full API trail:** [PROPOSAL] post → queue
-entry → claim → training → result file → [RESULT] post. Self-designed
-experiments follow the same trail; the only difference is the GPU agent
+entry → claim → evaluation → result file → [RESULT] post. Self-designed
+experiments follow the same trail; the only difference is the cpu-eval agent
 writes the proposal instead of an analyst.
 
 **Every queue item and [PROPOSAL] MUST include axis / direction / value
@@ -433,7 +305,7 @@ team_hits = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/search?q={mechanism_key
 # If your mechanism appears in dead_ends or similar analysis, skip it
 
 # 3. Check if the mechanism already exists in champion code
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 if mechanism_keyword.lower() in champion_code.lower():
     print(f"ALREADY IN CODE: {mechanism_keyword} — skip this experiment")
     # Release claim and pick next experiment
@@ -476,57 +348,54 @@ that is not already installed in `{FOCUS_ROOT}/.cache/repos/`:
 **Time budget:** factor in 15-30 min for first-time setup when deciding
 whether to run this experiment or pick a lighter one from the queue instead.
 
-### Step 4 — Apply Change and Train
+### Step 4 — Apply Change and Evaluate
 
-Apply ONE change from the experiment's diff, then **block synchronously** on
-training. Detached / fire-and-forget training is forbidden: round 19 showed
-that when the agent's claude session ends before parsing `train.stdout`, the
-real metric is computed but never recorded — the entire cycle's work
-vanishes. The agent MUST wait for the training subprocess and then run
-Steps 5–8 in the same session.
+Apply ONE change from the experiment's diff to `algo.py`, then **block synchronously** on the remote
+eval. Detached / fire-and-forget evaluation is forbidden: if the agent's claude session ends before
+parsing the eval JSON, the real metric is computed but never recorded — the entire cycle's work
+vanishes. The agent MUST wait for the `ssh` eval call to return and then run Steps 5–8 in the same
+session.
 
-**Before training, verify the diff actually landed.** If the Edit tool said
-`old_string not found`, `patch -p1` printed `FAILED` / `Hunk #N FAILED`, or the
-resulting `train.py` is byte-identical to `champion/train.py`, the proposal
-was NOT tested — training would just re-measure the baseline at noise. Set
-`item["diff_applied"] = False` on the sentinel BEFORE launching training, or
-better, skip training entirely and post `[RESULT] {exp_id}: FAILED` so the
-proposal can be re-queued with a fresh diff. Phantom KEEPs from this exact
-path (gpt-nano-pubrun round on 2026-05-26: `data_v7`, `0.979985`, diff
-rejected) corrupted the champion lineage — never let baseline noise be
-mistaken for evidence about a change.
+Evaluation is **deterministic and CPU-only**: the candidate's `minimize_func` is cloudpickled and run
+against a fixed molecule set on a remote Redis-backed worker pool. There is no GPU, no CUDA, no seed
+variance — the same `algo.py` always produces the same score.
+
+**Before evaluating, verify the diff actually landed.** If the Edit tool said `old_string not found`,
+`patch -p1` printed `FAILED` / `Hunk #N FAILED`, or the resulting `algo.py` is byte-identical to
+`champion/algo.py`, the proposal was NOT tested — evaluation would just re-measure the baseline. Set
+`item["diff_applied"] = False`, skip evaluation, and post `[RESULT] {exp_id}: FAILED` so the proposal
+can be re-queued with a fresh diff. A phantom KEEP from an unapplied diff corrupts the champion
+lineage — never let the unchanged baseline be mistaken for evidence about a change.
 
 ```python
 import filecmp
 diff_applied = not filecmp.cmp(
-    str(rep / "train.py"),
-    f"{FOCUS_ROOT}/champion/train.py",
+    str(rep / "algo.py"),
+    f"{FOCUS_ROOT}/champion/algo.py",
     shallow=False,
 )
 item["diff_applied"] = diff_applied
 if not diff_applied:
-    print(f"[STEP4] diff for {exp_id} did NOT apply — train.py matches champion. "
-          f"Marking FAILED and skipping training.")
-    # Jump to Step 5 with outcome="FAILED", our_metric=None.
+    print(f"[STEP4] diff for {exp_id} did NOT apply — algo.py matches champion. "
+          f"Marking FAILED and skipping evaluation.")
+    # Jump to Step 5 with outcome="FAILED", score=None.
 ```
 
-**Pattern A (default, foreground shell).** Use when you just want to watch
-training in the current shell:
+**Eval-head connection parameters** (the remote sella checkout serving the worker pool):
 
-```bash
-cd $FOCUS_ROOT/agents/$AGENT_NAME/workspace/repo
-CUDA_VISIBLE_DEVICES=$GPU_ID \
-UV_CACHE_DIR=$FOCUS_ROOT/.cache/uv HF_HOME=$FOCUS_ROOT/.cache/huggingface \
-TORCH_HOME=$FOCUS_ROOT/.cache/torch \
-uv run python train.py
+```python
+EVAL_HOST       = "cpu-149"     # eval-head (a002dc-0007); reachable from the laptop driver via this ssh alias
+EVAL_REDIS_HOST = "localhost"   # Redis AS SEEN FROM the eval head: its babysit tunnel localhost:6392 -> coordinator cp-33:6390
+EVAL_REDIS_PORT = 6392          # the eval head's local tunnel port to the shared AS Redis (cp-33:6390)
+SELLA_CHECKOUT  = "/home/tsypin/opt_problem_as_sella"   # sella-baseline checkout on the eval head; eval_candidate.py is at its ROOT
+EVAL_PYTHON     = "/home/tsypin/miniconda3/envs/gigaopt/bin/python"
 ```
 
-**Pattern B (blocking subprocess from Python, capture stdout/stderr to
-files).** Use when you want stdout/stderr persisted on disk for later
-inspection. This is still SYNCHRONOUS — `subprocess.run` waits for the
-training process to exit. NEVER use `subprocess.Popen` without an
-immediately-following `proc.wait()`; NEVER use `nohup ... &`; NEVER exit
-the agent session while training is still running.
+**Run the deterministic CPU eval.** `scp` the candidate `algo.py` to a UNIQUE remote path
+(`/tmp/cand_${AGENT}_${exp}.py` — unique per agent+experiment so concurrent evals never collide),
+then `ssh` into the eval head and run `eval_candidate.py`. This is SYNCHRONOUS — `subprocess.run`
+blocks until the eval JSON is returned. NEVER use `subprocess.Popen` without an immediately-following
+`proc.wait()`; NEVER use `nohup ... &`; NEVER exit the agent session while the eval is running.
 
 ```python
 import json, os, subprocess
@@ -535,17 +404,19 @@ from datetime import datetime, timezone
 
 ws  = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace")
 rep = ws / "repo"
-out, err = ws / f"train_{exp_id}.stdout", ws / f"train_{exp_id}.stderr"
+out, err = ws / f"eval_{exp_id}.stdout", ws / f"eval_{exp_id}.stderr"
+
+remote_cand = f"/tmp/cand_{AGENT_NAME}_{exp_id}.py"   # UNIQUE per agent+experiment
 
 sentinel = {
     "status": "running", "posted_to_workshop": False,
     "exp_id": exp_id, "agent": AGENT_NAME, "item": item, "queue_claimed": True,
-    "direction": direction, "val_score": None,
-    "submission_path": str(rep / f"submission_{exp_id}.csv"),
-    "train_path":      str(rep / f"train_{exp_id}.py"),
+    "direction": direction, "score": None, "fitness": None, "is_valid": None,
+    "algo_path":   str(rep / f"algo_{exp_id}.py"),
+    "remote_cand": remote_cand,
     "stdout_path": str(out), "stderr_path": str(err),
     # Record OUR pid so HEARTBEAT Part 0 Check C can tell whether we died
-    # ungracefully (rate limit, OOM, SIGKILL) vs. legitimately still training.
+    # ungracefully (rate limit, SIGKILL) vs. legitimately still evaluating.
     # `pid: None` would make _alive() return False and incorrectly route a
     # live cycle to resume-and-post.
     "pid": os.getpid(), "monitor_id": None, "description": description,
@@ -553,34 +424,64 @@ sentinel = {
 }
 (ws / "result_latest.json").write_text(json.dumps(sentinel, indent=2, default=str))
 
-# BLOCK until training finishes. 20-min hard cap matches the per-experiment
-# budget; raise it locally if you genuinely need longer runs (and document why).
+# 1. Copy the candidate algo.py to a unique path on the eval head.
+subprocess.run(["scp", str(rep / "algo.py"), f"{EVAL_HOST}:{remote_cand}"],
+               check=True, timeout=120)
+
+# 2. Run the deterministic eval on the eval head; it prints the score dict as
+#    a single JSON line on stdout (last line). BLOCK until it returns.
+eval_cmd = (
+    f"cd {SELLA_CHECKOUT} && {EVAL_PYTHON} eval_candidate.py "
+    f"--program {remote_cand} --redis-host {EVAL_REDIS_HOST} --redis-port {EVAL_REDIS_PORT}"
+)
 result = subprocess.run(
-    ["uv", "run", "python", "train.py"],
-    cwd=str(rep),
-    capture_output=True,
-    text=True,
-    timeout=1200,
-    env={**os.environ, "CUDA_VISIBLE_DEVICES": str(GPU_ID),
-         "UV_CACHE_DIR": f"{FOCUS_ROOT}/.cache/uv",
-         "HF_HOME":      f"{FOCUS_ROOT}/.cache/huggingface",
-         "TORCH_HOME":   f"{FOCUS_ROOT}/.cache/torch"},
+    ["ssh", EVAL_HOST, eval_cmd],
+    capture_output=True, text=True,
+    timeout=3600,   # the driver blocks per-molecule up to the worker timeout; size generously
 )
 out.write_text(result.stdout)
 err.write_text(result.stderr)
-training_succeeded = result.returncode == 0
-sentinel["status"] = "complete" if training_succeeded else "failed"
+
+# 3. Parse the LAST stdout line as the score JSON.
+score = None
+for line in reversed(result.stdout.strip().splitlines()):
+    line = line.strip()
+    if line.startswith("{"):
+        try:
+            score = json.loads(line)
+            break
+        except json.JSONDecodeError:
+            continue
+
+eval_succeeded = (result.returncode == 0) and (score is not None)
+sentinel["status"] = "complete" if eval_succeeded else "failed"
 sentinel["returncode"] = result.returncode
+sentinel["score"] = score
+sentinel["fitness"]  = (score or {}).get("fitness")
+sentinel["is_valid"] = (score or {}).get("is_valid")
 (ws / "result_latest.json").write_text(json.dumps(sentinel, indent=2, default=str))
-# Now parse the metric from result.stdout and continue to Step 4b → Step 5
-# in this same session — do NOT exit until the result is posted.
+# Now continue to Step 4b → Step 5 in this same session — do NOT exit until
+# the result is posted. If score is None, treat as a FAILED eval (infra error).
 ```
 
-If your training is too long to fit in one session, split it: run a shorter
-config (fewer steps, smaller batch) so the metric still flows back this
-cycle. A recorded partial result beats a perfect orphaned one.
+The score dict is the authoritative result. Its keys (emitted by `eval_candidate.py`):
 
-After training, save outputs to **agent-local paths** (never `task/` or `champion/`):
+| Key | Meaning |
+|---|---|
+| `fitness` | **Primary, lower is better.** `= mean_rel_steps` when valid; `= 1000.0` when invalid. |
+| `is_valid` | `1` iff no errors AND `max_final_energy_delta_kcal_mol < 1.0`; else `0`. |
+| `mean_rel_steps` | Mean relative force-call count vs reference. |
+| `mean_rel_energy` | Diagnostic only — does NOT gate validity. |
+| `max_final_energy_delta_kcal_mol` | Worst per-molecule final-energy gap; drives the validity gate. |
+| `converged` | Fraction of molecules whose convergence check passed. |
+| `invalid_reason` | Human string when invalid; empty when valid. |
+| `duration_s`, `num_results`, `num_errors`, `lower_is_better` | Diagnostics. |
+
+A candidate is an improvement **iff `is_valid == 1` AND `fitness` is lower than the champion**
+(with the seeding exception in Step 5). `fitness == 1000.0` (or `is_valid == 0`) means rejected.
+
+After the eval, save a stamped copy of the candidate to **agent-local paths** (never `task/` or
+`champion/`):
 
 ```python
 import shutil
@@ -588,91 +489,99 @@ from pathlib import Path
 
 agent_workspace = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
 
-# Save a stamped copy of the submission for this experiment
-agent_sub = agent_workspace / f"submission_{exp_id}.csv"
-shutil.copy(agent_workspace / "submission.csv", agent_sub)
+# Save a stamped copy of the candidate algo.py for this experiment
+agent_algo = agent_workspace / f"algo_{exp_id}.py"
+shutil.copy(agent_workspace / "algo.py", agent_algo)
 
-# Save a stamped copy of the train script for this experiment
-agent_train = agent_workspace / f"train_{exp_id}.py"
-shutil.copy(agent_workspace / "train.py", agent_train)
-
-print(f"[ISOLATION] saved submission → {agent_sub}")
-print(f"[ISOLATION] saved train     → {agent_train}")
+print(f"[ISOLATION] saved candidate → {agent_algo}")
 ```
 
-**Stamped files belong here in agent-local paths.** The shared `champion/train.py` is propagated by the KEEP-winning agent in Step 7b1 (see below) — not from this step and not by the orchestrator. The stamped copy must exist before Step 7b1 can copy it.
+**Stamped files belong here in agent-local paths.** The shared `champion/algo.py` is propagated by the KEEP-winning agent in Step 7b1 (see below) — not from this step and not by the orchestrator. The stamped copy must exist before Step 7b1 can copy it.
 
-### Step 4b — Analyze Training Dynamics — REQUIRED
+### Step 4b — Analyze Eval Diagnostics — REQUIRED
 
-After training completes, analyze the training log before recording the
-result. This takes 30 seconds and produces diagnostic signals that are
-more informative than the final metric alone.
+After the eval returns, read the diagnostic fields in the score dict before recording the result.
+This takes a few seconds and explains WHY a candidate passed or failed, not just its `fitness`.
 
-Check these three things from the training output:
+Check these from the score dict:
 
-1. **Was the loss still decreasing when training ended?** Compare the
-   loss at the final step to the loss at ~80% of training. If the loss
-   is still dropping meaningfully (>1% of its total range), the model
-   is **undertrained** — it would benefit from more steps. Note this in
-   the result file. This signal suggests step-increasing changes
-   (smaller batch, shorter sequences, faster kernels) are productive.
+1. **Validity first.** If `is_valid == 0`, the candidate is rejected regardless of `fitness`. Read
+   `invalid_reason` and `max_final_energy_delta_kcal_mol`: a value `>= 1.0` means some molecule's
+   final energy drifted outside the 1 kcal/mol band (the optimizer stopped too early / converged to a
+   worse minimum). `num_errors > 0` with reasons like `"exceeded max force-call budget"` means the
+   optimizer blew past `max_steps` on at least one molecule. Note which failure mode in the result
+   file — it tells analysts whether to loosen step-aggressiveness or tighten the convergence test.
 
-2. **Did the loss plateau early?** If the loss flattened before ~60%
-   of training, the model has **excess capacity** for this step count.
-   Note this. This signal suggests capacity can be reduced (smaller
-   model) or step count decreased (larger batch) without loss.
+2. **Energy headroom.** Even when valid, record `max_final_energy_delta_kcal_mol`. A value close to
+   `1.0` means the candidate is near the validity cliff — further step reductions risk tipping it
+   invalid. A comfortably-low value means there is room to trade accuracy for fewer steps.
 
-3. **How many training steps completed?** Record `num_steps` and
-   `tokens_seen` in the result file. These are the key throughput
-   metrics. Any experiment that reduces steps by >10% relative to
-   champion is fighting an uphill battle in a fixed-time benchmark —
-   flag this prominently so analysts can factor throughput into their
-   proposals.
+3. **Speed and coverage.** Record `mean_rel_steps` (= `fitness` when valid) and `converged` (fraction
+   of molecules whose convergence check passed). A low `mean_rel_steps` with `converged == 1.0` and
+   low energy delta is the ideal profile.
 
-Include these diagnostics in every result file under a `## Training
-Dynamics` section. Analysts use this information in Step 1b2 (post-KEEP
-inductive reasoning) to understand WHY a KEEP worked, not just that it
-did.
+Include these diagnostics in every result file under an `## Eval Diagnostics` section. Analysts use
+this to understand WHY a KEEP worked (or why a fast candidate was invalid), not just that it did.
 
 ### Step 5 — Record Result
 
 **Before recording: re-read champion.md to handle race conditions.**
 
 ```python
-# Re-read champion (may have changed during our 5-min training)
+# Re-read champion (may have changed during our eval).
 fresh_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
                          headers=HEADERS).json()
 fresh_champ = parse_frontmatter(fresh_raw)
-# Generic metric handling (supports different optimization directions)
-metric_name = fresh_champ["metric_name"]  # task defines this in champion.md
-direction = fresh_champ.get("direction", "minimize")  # "minimize" or "maximize"
-current_best = fresh_champ.get(metric_name, float("inf") if direction == "minimize" else float("-inf"))
+metric_name = fresh_champ.get("metric_name", "fitness")  # task defines this in champion.md
+direction   = fresh_champ.get("direction", "minimize")   # always "minimize" for this task
 fresh_version = fresh_raw.get("version", 0)
 
 race_condition = (fresh_version != champ_version)
 if race_condition:
-    print(f"Champion changed during training (v{champ_version} → v{fresh_version})")
+    print(f"Champion changed during eval (v{champ_version} → v{fresh_version})")
 
-# Compare against CURRENT champion, not the one we read before training.
-# Use < for minimize (smaller is better), > for maximize (larger is better).
-#
+# Pull this candidate's metrics from the deterministic eval score dict.
+our_metric = float(score["fitness"]) if score is not None else None
+cand_valid = (score is not None) and (int(score.get("is_valid", 0)) == 1)
+
+# Is there a VALID champion yet? The baseline algo.py may itself be INVALID
+# under the energy gate, so champion.md may have no valid fitness recorded.
+# `status: awaiting_baseline` or a missing/None metric_value ⇒ no valid champion.
+champ_status   = fresh_champ.get("status")
+champ_fitness  = fresh_champ.get(metric_name)
+have_valid_champion = (champ_status not in ("awaiting_baseline", None)) and \
+                      (champ_fitness is not None) and (float(champ_fitness) < 1000.0)
+current_best = float(champ_fitness) if have_valid_champion else None
+
 # IMPORTANT: a result is only meaningful if the proposed diff actually applied.
-# If Step 4's edit failed (Edit tool said old_string not found, patch -p1
-# rejected hunks, etc.) and you trained on the untouched champion code anyway,
-# the metric you measured is baseline noise — NOT evidence about the proposal.
-# Recording it as KEEP corrupts the champion (a phantom that didn't test the
-# proposed change); recording it as DISCARD wrongly refutes the proposal.
-# Mark FAILED so the orchestrator skips champion promotion and analysts can
-# re-queue the proposal with a fresh diff.
+# If Step 4's edit failed (old_string not found, patch rejected, algo.py identical
+# to champion), the score you measured is the UNCHANGED baseline — NOT evidence
+# about the proposal. Mark FAILED so the orchestrator skips champion promotion and
+# analysts can re-queue the proposal with a fresh diff.
 diff_applied = bool(item.get("diff_applied", True))  # default True for legacy items
 
+# ── KEEP decision (deterministic; strict; with a seeding exception) ──────────
+#   * Invalid candidate (is_valid==0 / fitness==1000.0)        → DISCARD.
+#   * No VALID champion yet → first VALID candidate is a KEEP   (SEEDING),
+#     regardless of its fitness.
+#   * Otherwise KEEP iff VALID and STRICTLY lower fitness than the champion.
+# Eval is deterministic — no multi-seed gate, no noise band. A strictly-lower
+# fitness among valid candidates is a real, reproducible improvement.
 if not diff_applied:
     outcome = "FAILED"
-elif (direction == "minimize" and our_metric < current_best) or \
-     (direction == "maximize" and our_metric > current_best):
+elif not cand_valid:
+    outcome = "DISCARD"          # invalid candidates are worthless: correctness first
+elif not have_valid_champion:
+    outcome = "KEEP"             # SEEDING: first valid candidate seeds the champion
+elif our_metric < current_best:  # STRICT less-than; lower fitness is better
     outcome = "KEEP"
 else:
     outcome = "DISCARD"
+
+# Signed improvement vs the current champion (negative == better for this
+# minimize task). Used in the [RESULT] post, champion.md, dead_ends, and SOURCE.
+# No valid champion to compare against ⇒ delta is undefined (0.0 placeholder).
+delta = (our_metric - current_best) if (our_metric is not None and current_best is not None) else 0.0
 ```
 
 Write to **main workspace** (visible to all teams):
@@ -726,9 +635,10 @@ if claim_removed or len(remaining) != len(pending):
 
 ### Step 7 — Update Champion (KEEP only)
 
-If result is strictly better than current champion:
+If `outcome == "KEEP"` (valid AND strictly better than the current champion, or the first valid
+candidate under the seeding rule):
 
-**CRITICAL: Before propagating, make ALL improvements unconditional in your train.py.**
+**CRITICAL: Before propagating, make ALL improvements unconditional in your algo.py.**
 Do NOT gate changes behind `if EXPERIMENT_ID == "exp_foo"` or similar checks.
 Every improvement must be baked into the code as the default behavior.
 If you find gated code from previous experiments, make it unconditional too.
@@ -738,117 +648,39 @@ If you find gated code from previous experiments, make it unconditional too.
 # Good: value *= factor  (always active)
 ```
 
-#### Step 7.0 — Multi-Seed Gate — REQUIRED
-
-**Before writing the champion file, confirm the result is not a lucky
-seed.** Read the team's empirically-measured seed standard deviation
-from `knowledge/noise_floor.md` (or the team's canonical location for
-it). Let `sigma` be that value.
-
-- **If `|delta| > sigma * MARGIN`** (default `MARGIN = 2`), the result
-  is outside the one-seed noise band. Propagate as normal.
-- **If `|delta| <= sigma * MARGIN`**, the delta is inside a band where
-  a lucky seed could account for the improvement. You MUST re-run the
-  same code change on a **different random seed** before promoting.
-  - If the second-seed result is also strictly better than champion,
-    propagate.
-  - If the second-seed result is not better, classify as near-miss,
-    post a `[NEAR-MISS]` instead of promoting, and leave champion
-    unchanged. Do NOT overwrite champion on half-confirmed evidence.
-
-```python
-# Read empirical noise pairs (see analyst Step 0.5). If n<3, use
-# conservative 0.003 band.
-nf_raw = requests.get(
-    f"{API}/workspaces/{MAIN_WS_ID}/files/knowledge/noise_floor_data.md",
-    headers=HEADERS).json()
-pairs = parse_pairs(nf_raw.get("content", ""))
-if len(pairs) >= 3:
-    sigma = pooled_std(pairs)
-    noise_floor = sigma
-else:
-    noise_floor = 0.0015  # conservative, implies 2σ band ≈ 0.003
-
-MARGIN = 2.0
-if abs(delta) > noise_floor * MARGIN:
-    promote = True
-else:
-    # Borderline — re-run on a different seed before promoting, AND
-    # append the (metric_a, metric_b, code_hash) triple to
-    # knowledge/noise_floor_data.md so future runs get better σ for
-    # free. This is the lazy-calibration source.
-    second_seed_metric = run_training_on_fresh_seed(code=our_code)
-    _append_noise_pair(MAIN_WS_ID, our_metric, second_seed_metric, code_hash=sha1_of_train_py)
-    promote = (second_seed_metric is strictly better than current_best)
-```
-
-The append is REQUIRED on every second-seed invocation. Without it the
-noise floor never accumulates and the conservative default (0.003)
-stays active forever, which blocks real small-delta KEEPs long-term.
-
-**3-seed confirmation for persistent NEAR-MISSes.** If the same
-(axis, direction, value) has already produced 2 NEAR-MISS results
-with a consistent pattern (same seed beats champion, other seed
-doesn't), do NOT discard the result as noise. Instead, launch a
-**third** seed on the same code. Promote only if ≥2 of the 3 seeds
-beat champion. This resolves the case where a real sub-noise signal
-keeps showing up but can never clear the 2-seed gate.
-
-Look up prior same-tuple NEAR-MISSes in `knowledge/near_miss_ledger.md`
-before classifying. If current run is the 3rd attempt on the same
-tuple, run seed 3 immediately; don't require another full claim cycle.
-
-**Why this exists:** the champion file is the baseline every subsequent
-experiment is measured against. A single-seed lucky draw that slips
-into champion corrupts every downstream comparison — every "it's
-better by +0.0005" judgment is made relative to a fictional baseline.
-One measurement showed the seed-variance band was 4-6× larger than
-the previously-assumed noise floor, which means several past champion
-updates may have been artifacts. A multi-seed confirmation gate
-prevents this from continuing to accumulate.
-
-**If `knowledge/noise_floor.md` doesn't exist yet**, your team has not
-measured seed variance. Before promoting anything near noise, post a
-`[SUGGESTION]` requesting a seed-variance infrastructure probe (or run
-it yourself as a dormant-team activity), then apply this gate once a
-measurement exists. Until then, treat any delta smaller than the
-prior-champion-delta as "not confirmed" and do not promote.
+**Eval is deterministic — promote unconditionally on KEEP.** There is NO multi-seed gate and NO
+noise-floor band: a candidate that is valid and strictly lower in `fitness` than the champion (or the
+first valid candidate under the seeding rule) is a real, reproducible improvement. Write the champion
+immediately. Do not re-run anything to "confirm" the result — re-running the same `algo.py` produces
+byte-identical scores.
 
 #### Step 7a — Extract Reproduction Information
 
 ```python
-import re, json
+import re
 
-# 1. Read YOUR train.py docstring (experiment description)
-with open(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/train.py") as f:
+# 1. Read YOUR algo.py docstring (experiment description)
+with open(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/algo.py") as f:
     code = f.read()
 docstring_match = re.search(r'"""(.*?)"""', code, re.DOTALL)
 experiment_description = docstring_match.group(1).strip() if docstring_match else "No description provided"
 
-# 2. Parse JSON hyperparameters from training stdout
-# train.py prints JSON between === markers. Extract it:
-json_match = re.search(r'=+\n({.*?})\n=+', training_stdout, re.DOTALL)
-hyperparameters_json = json.loads(json_match.group(1)) if json_match else {}
+# 2. The full eval result dict (from Step 4) IS the structured result — no stdout
+#    parsing needed. It is deterministic and complete.
+result_metrics = score  # the JSON dict: fitness, is_valid, mean_rel_steps, etc.
 ```
 
 #### Step 7b — Build Complete champion.md
 
-**champion.md must be a complete standalone reproduction recipe.** Include ALL information needed to reproduce without reading train.py.
+**champion.md must be a complete standalone reproduction recipe.** Include ALL information needed to reproduce without reading algo.py.
 
-**Recorded `metric_value` is the BEST seed observed.** When a multi-seed
-gate fired in Step 7.0, two measurements of the same code exist
-(`our_metric` from the proposal-default seed and `second_seed_metric`
-from the confirmation seed). Use the optimization-direction-best of
-the two so subsequent agents diff against the strongest evidence
-this code can produce, not against the worse draw. The other seed's
-value is preserved in `knowledge/noise_floor_data.md` as a
-reproducibility ledger and contributes to σ.
+**The recorded `metric_value` is the single deterministic `fitness`.** Eval is deterministic — there
+is exactly one measurement per `algo.py`, and re-running it reproduces the same value byte-for-byte.
+There are no seeds, no seed_values, and no best-of-N selection.
 
 ```python
-# Choose the BEST seed value across all multi-seed runs of this code.
-# direction="minimize" → use min; direction="maximize" → use max.
-seed_metrics = [our_metric] + ([second_seed_metric] if 'second_seed_metric' in dir() else [])
-champion_metric = min(seed_metrics) if direction == "minimize" else max(seed_metrics)
+import json
+champion_metric = our_metric   # the deterministic fitness from the eval score dict
 
 # Read current champion version for If-Match
 current_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md", headers=HEADERS).json()
@@ -857,8 +689,8 @@ current_version = current_raw.get("version", 0)
 champion_content = f"""---
 metric_name: {metric_name}
 metric_value: {champion_metric}
-seed_values: {seed_metrics}
 direction: {direction}
+is_valid: {int(score.get('is_valid', 0))}
 experiment_id: {exp_id}
 agent: {AGENT_NAME}
 timestamp: {datetime.now(timezone.utc).isoformat()}
@@ -872,27 +704,27 @@ timestamp: {datetime.now(timezone.utc).isoformat()}
 
 ## Result
 
-- **Recorded metric (best of {len(seed_metrics)} seeds):** {metric_name} = {champion_metric}
-- **All seed values:** {seed_metrics}
+- **Recorded metric:** {metric_name} = {champion_metric}
 - **Delta from previous:** {delta:+.6f}
 
-## Complete Hyperparameters
+## Eval Score
 
 ```json
-{json.dumps(hyperparameters_json, indent=2)}
+{json.dumps(score, indent=2, sort_keys=True)}
 ```
 
 ## Reproduction
 
-1. Copy `{FOCUS_ROOT}/champion/train.py`
-2. Run: `CUDA_VISIBLE_DEVICES=0 uv run python train.py`
-3. Expected: {metric_name} ∈ {seed_metrics} (recorded best = {champion_metric})
+1. Copy `{FOCUS_ROOT}/champion/algo.py`
+2. scp it to the eval head and run:
+   `python task-sella/eval_candidate.py --program <remote algo.py> --redis-host localhost --redis-port 6380`
+3. Expected: {metric_name} = {champion_metric} (deterministic — exact match every run)
 
 ## Provenance
 
 - Agent: {AGENT_NAME}
 - Timestamp: {datetime.now(timezone.utc).isoformat()}
-- Source: {FOCUS_ROOT}/champion/train.py
+- Source: {FOCUS_ROOT}/champion/algo.py
 """
 
 requests.put(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
@@ -900,11 +732,11 @@ requests.put(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
     json={"content": champion_content})
 ```
 
-#### Step 7b1 — Propagate champion/train.py — REQUIRED on KEEP
+#### Step 7b1 — Propagate champion/algo.py — REQUIRED on KEEP
 
-**Immediately after the champion.md PUT succeeds, you MUST copy your stamped train file
-to `{FOCUS_ROOT}/champion/train.py` and append a SOURCE line.** The local champion file
-is read by every subsequent rotation's GPU agent in Step 2 — leaving it stale corrupts
+**Immediately after the champion.md PUT succeeds, you MUST copy your stamped candidate file
+to `{FOCUS_ROOT}/champion/algo.py` and append a SOURCE line.** The local champion file
+is read by every subsequent rotation's cpu-eval agent in Step 2 — leaving it stale corrupts
 every downstream baseline. This step is the agent's responsibility, not the orchestrator's.
 
 ```python
@@ -913,8 +745,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Atomic write: temp-then-rename so concurrent KEEPs cannot half-overwrite.
-src = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/train_{exp_id}.py")
-dst = Path(f"{FOCUS_ROOT}/champion/train.py")
+src = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/algo_{exp_id}.py")
+dst = Path(f"{FOCUS_ROOT}/champion/algo.py")
 tmp = dst.with_suffix(".py.tmp")
 shutil.copy(src, tmp)
 tmp.replace(dst)  # atomic on POSIX
@@ -926,20 +758,20 @@ with src_log.open("a") as f:
     f.write(f"{exp_id} {our_metric:.6f} {AGENT_NAME} {ts}\n")
 ```
 
-**Race-safety:** if multiple GPU agents land KEEPs in the same rotation, the champion.md
+**Race-safety:** if multiple cpu-eval agents land KEEPs in the same rotation, the champion.md
 PUT serializes them via If-Match — only one wins. The losing agent's `our_metric < current_best`
-check at the top of Step 7 will already have failed (champion changed during their training),
+check at the top of Step 5 will already have failed (champion changed during their eval),
 so they will not enter Step 7b1. The winning agent's `tmp.replace(dst)` is atomic.
 
 **Why this exists:** the champion file is the baseline every subsequent experiment's
-diff is applied against. A 4-KEEP-deep stale champion file means agents who don't know
-to read the latest stamped train file in the winning workspace will silently regress
+diff is applied against. A several-KEEP-deep stale champion file means agents who don't know
+to read the latest stamped candidate in the winning workspace will silently regress
 the codebase. This step replaces the prior "orchestrator promotes" model that was
 unreliable in practice.
 
 #### Step 7c — Write result_latest.json (agent-local sentinel)
 
-`result_latest.json` is your post-training state record — it lets HEARTBEAT Part 0
+`result_latest.json` is your post-eval state record — it lets HEARTBEAT Part 0
 resume an unposted result on the next session and is read by analysts who want to
 know your last outcome. Champion propagation already happened in Step 7b1; this file
 is purely a sentinel.
@@ -954,10 +786,10 @@ prior = json.loads(rl.read_text()) if rl.exists() else {}
 rep = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
 
 rl.write_text(json.dumps({**prior,
-    "val_score": our_metric, "direction": direction,
+    "score": score, "fitness": our_metric, "is_valid": int(score.get("is_valid", 0)),
+    "direction": direction,
     "exp_id": exp_id, "agent": AGENT_NAME,
-    "submission_path": str(rep / f"submission_{exp_id}.csv"),
-    "train_path":      str(rep / f"train_{exp_id}.py"),
+    "algo_path": str(rep / f"algo_{exp_id}.py"),
     "timestamp": datetime.now(timezone.utc).isoformat(),
     # Resume fields — HEARTBEAT Part 0 Check C reads these. REQUIRED.
     "status": "complete", "posted_to_workshop": False, "result_post_id": None,
@@ -968,7 +800,7 @@ rl.write_text(json.dumps({**prior,
 ```
 
 **If DISCARD:** write the result to `dead_ends.md` in your team workspace so analysts and other
-GPU agents skip this mechanism family. Use If-Match to avoid clobbering concurrent writes.
+cpu-eval agents skip this mechanism family. Use If-Match to avoid clobbering concurrent writes.
 
 ```python
 if outcome == "DISCARD":
@@ -1034,38 +866,18 @@ rl.update({"status": "posted", "posted_to_workshop": True,
 rl_path.write_text(json.dumps(rl, indent=2, default=str))
 ```
 
-### Step 9 — Near-Miss Protocol
+### Step 9 — (removed) No Near-Miss Protocol
 
-A "near-miss" only makes sense as a **signal-carrying DISCARD** — a result
-close enough to champion that the underlying mechanism may still be
-productive. It must be anchored to the **team's noise floor** (see the
-analyst Step 1a noise-floor rule), not a fixed global delta threshold:
+Eval is **deterministic** — there is no measurement noise and therefore no noise band to anchor a
+"near-miss" against. Every result is exactly KEEP or DISCARD (or FAILED for an unapplied diff):
 
-- **Delta inside the noise band:** NOT a near-miss. It's noise. Do NOT
-  post a [NEAR-MISS] and do NOT trigger a cross-team follow-up. If it's
-  the only point on its axis, leave the axis open; if it's part of a
-  bracketed minimum already above the noise band, the axis is closed.
-- **Delta clearly above the noise band but within a small multiple of
-  it:** legitimate near-miss. Post a [NEAR-MISS] and let analysts apply
-  the Step 1a far / opposite / 2-point rule before any follow-up.
+- A **valid** candidate with strictly-lower `fitness` than the champion (or the first valid candidate
+  under the seeding rule) is a **KEEP**.
+- Any other valid result, or any **invalid** result (`is_valid == 0` / `fitness == 1000.0`), is a
+  **DISCARD** — recorded in `dead_ends.md` (Step 7c) so the mechanism family is not re-tried.
 
-```python
-noise_floor = ...  # team's current estimate from knowledge/noise_floor.md
-if (delta > noise_floor) and (delta < noise_floor * SMALL_MULTIPLE):
-    requests.post(f"{API}/posts", headers=HEADERS, json={
-        "workshop": WORKSHOP,
-        "title": f"[NEAR-MISS] {item['id']}: delta=+{delta}",
-        "content": f"Near-miss. Team: {MY_TEAM}. Description: {description}. "
-                   f"Delta: {delta} (noise floor {noise_floor}).",
-        "notify_agents": all_agent_names,
-        "tags": ["type:near-miss"],
-    })
-```
-
-**Do not** simultaneously label a result as a near-miss AND register it
-as an axis-exhaustion trigger — if it qualifies for the former it is
-signal, if it qualifies for the latter it is too high above the noise
-floor for any refinement to reach KEEP and the axis is closed.
+Do NOT post `[NEAR-MISS]` and do NOT consult any noise floor. A non-improving deterministic delta is
+simply a DISCARD; the structured dead-end entry carries the signal analysts need.
 
 ### Step 10 — Run Second Experiment
 
