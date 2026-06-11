@@ -29,7 +29,7 @@ Before ANY other work, you must determine which branch to execute. Follow these 
 
 The orchestrator may include `MODE=discussion` or `MODE=execute` in your launch prompt. Read your launch prompt carefully now.
 
-- **`MODE=discussion`** → go to **Part 2 (Discussion Branch)**. CPU-only. No experiments. Even if you are a GPU agent, you do thinking work this cycle.
+- **`MODE=discussion`** → go to **Part 2 (Discussion Branch)**. CPU-only. No experiments. Even if you are a CPU-eval agent, you do thinking work this cycle.
 - **`MODE=execute`** (or no MODE set) → continue to Check A2.
 
 ### Check A2: Workshop-triggered discussion — agents self-regroup
@@ -95,24 +95,24 @@ for name, t in roster.items():
 - **`roster` has teams but `MY_TEAM is None` (you are not on any team)** → go to **Part 3 (No-Team Branch)**. Exit cleanly. (This case means teams exist but you were left out of the roster — a coordination bug; report it and exit rather than freelancing.)
 - **`MY_TEAM` is set** → continue to Check C.
 
-### Check C: Pending result from a prior session? (GPU agents only)
+### Check C: Pending result from a prior session? (CPU-eval agents only)
 
 If a prior invocation backgrounded training and exited before posting `[RESULT]`,
 finish that first. The sentinel is `agents/{AGENT_NAME}/workspace/result_latest.json`.
-Only GPU agents create this sentinel, so skip this check for other roles.
+Only CPU-eval agents create this sentinel, so skip this check for other roles.
 
 ```python
 import json, os, re
 from pathlib import Path
 
 # Derive MY_ROLE from AGENT.md frontmatter — needed here (before Part 1 boots
-# AGENT.md more fully) because Check C is GPU-only.
+# AGENT.md more fully) because Check C is CPU-eval-only.
 _agent_md = (AGENT_DIR / "AGENT.md").read_text() if (AGENT_DIR / "AGENT.md").exists() else ""
 _m = re.search(r"^role:\s*(\S+)", _agent_md, re.MULTILINE)
 MY_ROLE = _m.group(1).strip() if _m else "unknown"
 
-if MY_ROLE != "gpu":
-    pending_result = None  # non-GPU roles never create result_latest.json — skip to Check D
+if MY_ROLE != "cpu":
+    pending_result = None  # non-eval roles never create result_latest.json — skip to Check D
 else:
     pending_path = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/result_latest.json")
     pending_result = json.loads(pending_path.read_text()) if pending_path.exists() else None
@@ -144,7 +144,7 @@ if pending_result and not pending_result.get("posted_to_workshop"):
         pending_path.write_text(json.dumps(pending_result, indent=2))
 
     if status == "running" and _alive(pending_result.get("pid")):
-        branch_taken = "resume-waiting"   # GPU busy — log and exit via Part 6e, no new work
+        branch_taken = "resume-waiting"   # eval still running — log and exit via Part 6e, no new work
     elif status == "complete":
         branch_taken = "resume-and-post"  # go to Part 5 after minimal Part 1 boot
     # else status="posted" → fall through to Check D
@@ -161,7 +161,7 @@ self-recover, the orchestrator may post the [RESULT] directly using the
 agent's token (read `stdout_path` for the metric, write a [RESULT] post
 tagged `salvaged:true`, release the queue claim, mark sentinel posted). The
 gpt-nano-agents 2026-05-26 run exercised this exact path for `throughput_v11`
-when gpu5 hit a Claude rate limit mid-cycle.
+when cpu5 hit a Claude rate limit mid-cycle.
 
 ### Check D: Normal cycle
 
@@ -171,8 +171,8 @@ You have a team, no pending result, and the launch prompt did not request discus
 
 | Launch MODE | Roster | MY_TEAM | Pending result? | Branch | What you do |
 |---|---|---|---|---|---|
-| any | any | any | (GPU only) unposted, training still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
-| any | any | any | (GPU only) unposted, training finished | Part 5 | Post [RESULT], update champion, mark posted |
+| any | any | any | (CPU-eval only) unposted, eval still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
+| any | any | any | (CPU-eval only) unposted, eval finished | Part 5 | Post [RESULT], update champion, mark posted |
 | `discussion` | any | any | none | Part 2 | CPU-only thinking, read + respond + propose |
 | `execute` or unset | empty | — | none | Part 2 | Cold-start bootstrap: contribute to dimension discussion so a roster can be committed |
 | `execute` or unset | non-empty | None | none | Part 3 | Exit cleanly (you are not on any team — coordination bug) |
@@ -291,7 +291,7 @@ when the score strictly improves. Violating this causes agents to overwrite each
     consecutive experiments that only adjust regularization coefficients, search trial
     counts, or seed counts on the same architecture is not recommended — these tend to
     produce deltas inside the CV noise band without improving held-out generalization.
-    See ROLE-GPU Step 2a for full guidance.
+    See ROLE-CPU Step 2a for full guidance.
 
 4. **Every experiment must save a stamped `submission_<expid>.csv` to your agent workspace
    and update `result_latest.json` before exiting** — not just the last one. Never write to
@@ -299,7 +299,7 @@ when the score strictly improves. Violating this causes agents to overwrite each
    ensure `result_latest.json` always points to a valid submission file.
 
 5. **No champion/train.py on cycle 1:** For biomlbench tasks, `champion/train.py` does not
-   exist at the start. When you reach Step 2 (Read Champion Config) of ROLE-GPU and
+   exist at the start. When you reach Step 2 (Read Champion Config) of ROLE-CPU and
    `champion/train.py` is missing, skip the copy step and instead write `train.py` from scratch
    in your workspace (`{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/train.py`) using the
    instructions in `task/TASK.md`. This IS your baseline experiment.
@@ -307,20 +307,20 @@ when the score strictly improves. Violating this causes agents to overwrite each
 6. **GPU step for CPU-only tasks.** If `CUDA_VISIBLE_DEVICES` is empty in your launch prompt
    (`CUDA_VISIBLE_DEVICES=""`), skip `nvidia-smi`. Proceed directly to Step 1.5 (baseline
    coordination). All training runs on CPU. However, `GPU_AVAILABLE=False` does NOT restrict
-   your method choice — see ROLE-GPU Step 2a for the full CPU-friendly paradigm menu; do not
+   your method choice — see ROLE-CPU Step 2a for the full CPU-friendly paradigm menu; do not
    default to RDKit+XGBoost just because it is familiar.
 
 7. **Approach diversity (REQUIRED before any experiment).** Read `GPU_AVAILABLE` from your
    launch prompt. Before claiming any experiment or self-designing one, read the approach
    registry at `{FOCUS_ROOT}/logs/approach_registry.json`. Do NOT run an approach already
-   registered by another agent this cycle. Follow the registration protocol in ROLE-GPU Step 2a-i.
+   registered by another agent this cycle. Follow the registration protocol in ROLE-CPU Step 2a-i.
 
 8. **Compute-mode declaration (REQUIRED if GPU_AVAILABLE=True).** After registering your
    approach and before any training, write your compute mode to a one-line file:
-   `echo 'gpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.gpu_claim`  (GPU experiment)
-   `echo 'cpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.gpu_claim`  (CPU-only experiment)
+   `echo 'gpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.cpu_claim`  (GPU experiment)
+   `echo 'cpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.cpu_claim`  (CPU-only experiment)
    The orchestrator reads this to decide whether to serialize or parallelize the next agent.
-   Write it as early as possible — within ~60 s of starting. See ROLE-GPU Step 2a-ii for full
+   Write it as early as possible — within ~60 s of starting. See ROLE-CPU Step 2a-ii for full
    guidance on which experiments are GPU vs CPU and how to balance the mix across the team.
 
 9. **After every training run, write a local result summary** so the orchestrator can find
@@ -572,7 +572,7 @@ Follow your role-specific protocol below (Part 4-Role) and team coordination pro
 ### 4e. Mandatory API trail
 
 Every experiment, proposal, or knowledge artifact you produce in this branch MUST be reflected in the AnonAPI API:
-- **GPU agents**: claim from queue → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. If KEEP, also PUT `champion.md`.
+- **CPU-eval agents**: claim from queue → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. If KEEP, also PUT `champion.md`.
 - **Analysts**: POST `[PROPOSAL]` to workshop → PATCH team `queue.md` to add the experiment.
 
 If you cannot complete the API trail for an artifact, do not produce the artifact. Local-only work (writing only to `agents/{AGENT_NAME}/memory/`, mutating `champion/train.py` without the trail) is FREELANCING and is forbidden.
@@ -593,9 +593,9 @@ If you cannot complete the API trail for an artifact, do not produce the artifac
 
 ---
 
-## Part 5: Branch — Resume-and-Post (GPU agents only)
+## Part 5: Branch — Resume-and-Post (CPU-eval agents only)
 
-Finish a prior session's unposted result. Do NOT claim new work, do NOT touch `train.py`. **If `MY_ROLE != "gpu"`, you should never have been routed here — skip Part 5 entirely and fall through to Part 6.** Only GPU agents write `result_latest.json`; an analyst/monitor reaching this branch indicates a bug upstream, and the only safe action is to exit without doing anything. Inlines the champion-update path from ROLE-GPU.md Step 7.0 (noise gate) + Step 7b (champion.md PUT); both required on KEEP.
+Finish a prior session's unposted result. Do NOT claim new work, do NOT touch `train.py`. **If `MY_ROLE != "cpu"`, you should never have been routed here — skip Part 5 entirely and fall through to Part 6.** Only CPU-eval agents write `result_latest.json`; an analyst/monitor reaching this branch indicates a bug upstream, and the only safe action is to exit without doing anything. Inlines the champion-update path from ROLE-CPU.md Step 7.0 (noise gate) + Step 7b (champion.md PUT); both required on KEEP.
 
 ```python
 import json, yaml
@@ -645,7 +645,7 @@ else:
     outcome = "KEEP" if improved else "DISCARD"
 delta   = (our_metric - current_best) if direction == "maximize" else (current_best - our_metric)
 
-# 5c. Release claim AND move item pending→completed (same as ROLE-GPU.md Step 6).
+# 5c. Release claim AND move item pending→completed (same as ROLE-CPU.md Step 6).
 # Best-effort; monitor's 30-min sweep may have already cleared the claim — 409/missing = OK.
 try:
     q_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/queue.md", headers=HEADERS).json()
@@ -675,8 +675,8 @@ try:
 except Exception as e:
     print(f"[RESUME] claim release skipped: {e!r}")
 
-# 5d. If KEEP: run the multi-seed noise gate from ROLE-GPU.md Step 7.0, then PUT
-#     champion.md per ROLE-GPU.md Step 7a/7b (with If-Match on champ_raw version for
+# 5d. If KEEP: run the multi-seed noise gate from ROLE-CPU.md Step 7.0, then PUT
+#     champion.md per ROLE-CPU.md Step 7a/7b (with If-Match on champ_raw version for
 #     race safety — another agent may have promoted while you were gone). Near-noise
 #     delta without second-seed confirmation → demote to DISCARD and skip the PUT.
 
@@ -791,7 +791,7 @@ Before you do ANY work, confirm in your head:
 - [ ] I read `teams/roster.md` and determined `MY_TEAM`.
 - [ ] I checked `agents/{AGENT_NAME}/workspace/result_latest.json` for an unposted prior result (Part 0 Check C).
 - [ ] I picked exactly ONE branch from the Part 0 table.
-- [ ] If resume-waiting: I will NOT claim new work; the GPU is still busy with my own training.
+- [ ] If resume-waiting: I will NOT claim new work; the eval is still running from my own session.
 - [ ] If Part 5 (resume-and-post): I will post the prior result and set `posted_to_workshop=true`; I will NOT start a new experiment.
 - [ ] If Part 2 (discussion): I will NOT touch any training code.
 - [ ] If Part 3 (no-team): I will exit immediately after recording.

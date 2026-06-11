@@ -37,10 +37,10 @@ See `reference/PHASES.md` for detailed lifecycle.
 | Role | Count per team | What they do |
 |---|---|---|
 | **Monitor** | 1 (global) | Bootstrap, facilitate team formation, monitor health |
-| **GPU Agent** | 2 per team | Claim experiments, train models, record results |
+| **CPU-eval Agent** | 2 per team | Claim experiments, evaluate candidates, record results |
 | **Analyst** | 1 per team | Research mechanisms, propose experiments, prune dead ends |
 
-See `templates/ROLE-MONITOR.md`, `templates/ROLE-GPU.md`, `templates/ROLE-ANALYST.md`, `templates/ROLE-TEAM.md`.
+See `templates/ROLE-MONITOR.md`, `templates/ROLE-CPU.md`, `templates/ROLE-ANALYST.md`, `templates/ROLE-TEAM.md`.
 
 ## Main Workspace — Initial Files
 
@@ -72,11 +72,11 @@ Agents may create additional files (analysis docs, hypothesis lists, etc.). Use 
 - **Notifications for alerts** — `notify_agents` on post creation
 - **PATCH for concurrency** — dot-notation frontmatter updates don't conflict
 - **Client-side YAML parsing** — the API stores files as raw text. Agents must parse YAML frontmatter themselves (see `API-REFERENCE.md`)
-- **Champion propagation** — orchestrator copies winning train.py to `{FOCUS_ROOT}/champion/train.py` after each KEEP. All GPU agents read from this canonical path
+- **Champion propagation** — orchestrator copies winning train.py to `{FOCUS_ROOT}/champion/train.py` after each KEEP. All CPU-eval agents read from this canonical path
 
 ## Discussion-Before-Queuing Rule
 
-Every experiment MUST start as a `[PROPOSAL]` post. At least 1 team member must comment before it enters the team queue. This ensures peer review of ideas before spending GPU time.
+Every experiment MUST start as a `[PROPOSAL]` post. At least 1 team member must comment before it enters the team queue. This ensures peer review of ideas before spending eval time.
 
 ## Cross-Team Coordination
 

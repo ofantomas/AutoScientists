@@ -77,8 +77,8 @@ champ = parse_frontmatter(champ_raw)
 
 if champ.get("status") == "awaiting_baseline":
     # Try to claim the baseline lock with If-None-Match (atomic).
-    # First GPU to arrive wins the lock and runs the baseline; every
-    # other GPU reads a real experiment from queue instead.
+    # First CPU-eval agent to arrive wins the lock and runs the baseline; every
+    # other agent reads a real experiment from queue instead.
     r = requests.put(f"{API}/workspaces/{MAIN_WS_ID}/files/baseline_lock.md",
                      headers={**HEADERS, "If-None-Match": "*"},
                      json={"content": f"holder: {AGENT_NAME}\nclaimed_at: {NOW}\n"})
@@ -178,7 +178,7 @@ else:
     #   1. Post a [PROPOSAL] to the workshop (full rationale + diff)
     #   2. Add it to your team's queue.md
     #   3. Claim it below
-    # This maintains the full API trail while not wasting GPU time.
+    # This maintains the full API trail while not wasting eval time.
     # Teams are HYPOTHESIS-based, not axis-based — propose any axis as
     # long as the change is consistent with your team's hypothesis.
     # Prefer changes that are:
@@ -210,8 +210,8 @@ lens, you can claim it.
 # Skip items that don't yet meet this bar and pick the next one.
 #
 # Two auto-clear overrides prevent the gate from starving the queue
-# (observed in gpt-nano-agents 2026-05-26: cycles 7-12 had GPU agents
-# posting near-empty "[GPU-REVIEW] acknowledged" comments just to satisfy
+# (observed in gpt-nano-agents 2026-05-26: cycles 7-12 had CPU-eval agents
+# posting near-empty "[CPU-REVIEW] acknowledged" comments just to satisfy
 # the gate, burning API budget for no information value):
 #
 #   1. Time-based: if the proposal was posted more than DISCUSSION_GRACE
@@ -219,7 +219,7 @@ lens, you can claim it.
 #      passed; agents who wanted to comment had their chance.
 #   2. Queue-starvation: if THIS is the only `discussion_pending: true`
 #      item remaining and there are no non-pending items either, claim
-#      it. A blocked GPU is worse than a thinly-discussed proposal.
+#      it. A blocked CPU-eval agent is worse than a thinly-discussed proposal.
 import time
 DISCUSSION_GRACE_SEC = 15 * 60
 
@@ -244,7 +244,7 @@ if item.get("discussion_pending"):
                            if it.get("id") != item["id"]
                            and not it.get("discussion_pending")]
         if not other_claimable:
-            cleared = True  # rather claim discussion-pending than idle the GPU
+            cleared = True  # rather claim discussion-pending than idle the agent
 
     # Default path: require a non-author comment
     if not cleared and proposal_id:
@@ -343,7 +343,7 @@ that is not already installed in `{FOCUS_ROOT}/.cache/repos/`:
    If `knowledge/setup_{REPO_NAME}.md` exists, load pre-cached embeddings
    instead of re-running extraction.
 3. After successful setup, write `knowledge/setup_{REPO_NAME}.md` to the
-   team workspace so other GPU agents can reuse the cached embeddings.
+   team workspace so other CPU-eval agents can reuse the cached embeddings.
 
 **Time budget:** factor in 15-30 min for first-time setup when deciding
 whether to run this experiment or pick a lighter one from the queue instead.

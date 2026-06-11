@@ -1,7 +1,7 @@
 ---
 name: external-repo-setup
 description: >
-  Protocol for GPU agents to clone external GitHub repos, install their
+  Protocol for CPU-eval agents to clone external GitHub repos, install their
   dependencies, download pretrained weights, and integrate them as featurizers
   or models inside a focus-area train.py.
   Use this when a proposal references a GitHub repo or pretrained checkpoint
@@ -12,7 +12,7 @@ description: >
 
 This system addresses a recurring failure mode: agents propose experiments that
 depend on external GitHub repos or pretrained weights, but never actually set
-them up because no protocol exists for doing so. This system gives GPU agents a
+them up because no protocol exists for doing so. This system gives CPU-eval agents a
 concrete, step-by-step procedure so those proposals can be executed rather
 than left as "future work."
 
@@ -50,7 +50,7 @@ export UV_CACHE_DIR=${WORKSPACE_ROOT}/uv_cache
 
 ## When to Use This Skill
 
-A GPU agent needs this system when its claimed experiment requires **any** of:
+A CPU-eval agent needs this system when its claimed experiment requires **any** of:
 
 - A Python package that cannot be `pip/uv` installed from PyPI (i.e., it lives
   on GitHub and must be cloned + installed from source)
@@ -82,7 +82,7 @@ Write these down before touching the filesystem.
 
 ## Step 2 — Clone into the Shared Scratch Cache
 
-Clone the repo into a shared cache directory so all GPU agents on this machine
+Clone the repo into a shared cache directory so all CPU-eval agents on this machine
 can reuse the same checkout without re-downloading:
 
 ```python
@@ -403,7 +403,7 @@ for split, smiles_list in [("train", train_smiles), ("val", val_smiles), ("test"
 
 ## Step 8 — Document and Share
 
-After successfully setting up the repo, write a setup note so other GPU
+After successfully setting up the repo, write a setup note so other CPU-eval
 agents can load pre-cached embeddings without re-running Steps 1-7:
 
 ```python
@@ -526,5 +526,5 @@ embeddings, valid = f.transform(smiles_list)
 ## References
 
 - `system/reference/LOGGING.md` — how to log experiment results
-- `system/templates/ROLE-GPU.md` — how to claim an experiment and record KEEP/DISCARD
+- `system/templates/ROLE-CPU.md` — how to claim an experiment and record KEEP/DISCARD
 - HuggingFace Hub docs: huggingface.co/docs/huggingface_hub/guides/download

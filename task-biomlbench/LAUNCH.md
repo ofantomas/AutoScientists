@@ -509,7 +509,7 @@ def _gpu_prompt(agent_name, rem, cuda):
         compute_note = (
             "COMPUTE: No GPU available. All training runs on CPU.\n"
             "You are running in parallel with other agents on the shared CPU pool.\n"
-            "Do NOT all pick the same approach — see approach diversity rules in ROLE-GPU Step 2a.\n"
+            "Do NOT all pick the same approach — see approach diversity rules in ROLE-CPU Step 2a.\n"
             "Good CPU methods: RDKit+GBM, Morgan+SVR, Mordred+RF, Tanimoto-GP, AutoML, "
             "offline embeddings + linear head.\n"
         )
@@ -729,7 +729,7 @@ In addition to the universal "never do" list:
 - Do NOT launch GPU agents in parallel when `IS_CPU_ONLY=False` (only 1 GPU).
 - Do NOT launch GPU agents sequentially when `IS_CPU_ONLY=True` (wastes wall-clock).
 - Do NOT stop the loop due to stagnation — time is the only stopping criterion.
-- Do NOT edit `system/templates/ROLE-GPU.md` or `ROLE-ANALYST.md` (meta-improvement is disabled).
+- Do NOT edit `system/templates/ROLE-CPU.md` or `ROLE-ANALYST.md` (meta-improvement is disabled).
 - Do NOT use `champion/train.py` as the deliverable — the deliverable is `task/submission.csv`.
 
 **If you feel the urge to "just run something quickly" because agents are struggling or time is running out — stop. The orchestrator never runs experiments. Period.**

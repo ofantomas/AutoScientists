@@ -129,7 +129,7 @@ analyst_prompt_extras = ""   # no additions beyond base
 
 ---
 
-## Hook: gpu_dispatch
+## Hook: cpu_dispatch
 
 **CPU-eval dispatch. NO GPUs, NO CUDA, NO `nvidia-smi`.** Candidates are scored on a remote
 Redis-backed distributed validation worker pool. Concurrency is bounded by the size of that worker
@@ -140,7 +140,7 @@ collide.
 For each cpu-eval agent, launch in its own message:
 
 ```python
-eval_agents = [f"{PREFIX}_gpu{i}" for i in range(1, 7)]
+eval_agents = [f"{PREFIX}_cpu{i}" for i in range(1, 7)]
 
 # Dispatch all 6 cpu-eval agents every cycle (the full roster).
 #
@@ -197,7 +197,7 @@ else:
     outcome = "DISCARD"   # invalid candidates and non-improving valid candidates are discarded
 
 if outcome == "KEEP":
-    # NOTE: ROLE-GPU Step 7b1 is the authoritative agent-side propagation path;
+    # NOTE: ROLE-CPU Step 7b1 is the authoritative agent-side propagation path;
     # this orchestrator snippet is illustrative/backup. Copy the stamped candidate
     # (algo_{exp_id}.py) to match Step 7b1's source filename exactly.
     agent_algo = FOCUS_ROOT / "agents" / agent_name / "workspace" / "repo" / f"algo_{exp_id}.py"

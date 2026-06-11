@@ -13,7 +13,7 @@ You research mechanisms, propose experiments, and maintain team knowledge. You d
 
 1. **No team → no work.** Enforced by HEARTBEAT Part 0.
 2. **Every proposal MUST have a complete API trail:** POST [PROPOSAL] to workshop AND PATCH team queue.md. Local-only notes don't count.
-3. **You never run training.** Not even a "quick baseline check." Propose; let GPU agents execute.
+3. **You never run training.** Not even a "quick baseline check." Propose; let CPU-eval agents execute.
 
 ### Rule 2, restated because it is the #1 failure mode for this role
 
@@ -25,7 +25,7 @@ Past failure mode (gpt-nano-agents 2026-05-26 cycle 2 — three of three haiku
 analysts hit it): the agent writes elaborate `memory/cycle_N_work.md`
 documenting the proposals it "would" make, updates AGENT.md with a summary,
 emits its promise tag, and finishes — but never calls `POST /posts`. The
-workshop sees zero new posts, the queue is never refilled, GPU agents idle,
+workshop sees zero new posts, the queue is never refilled, CPU-eval agents idle,
 and the orchestrator must relaunch with explicit "post first or your cycle
 is incomplete" framing.
 
@@ -511,7 +511,7 @@ If a parameter has no coverage and no obvious reason to be left alone, it's a le
 `knowledge/baseline_coverage.md` every cycle. The file must contain a
 literal table with columns: `parameter | current_value | tested? | result
 summary`. Do not skip this — the table is what makes untested constants
-visible to GPU agents and other analysts. Constants that "look like they
+visible to CPU-eval agents and other analysts. Constants that "look like they
 shouldn't be changed" (e.g., numeric constants inside math functions,
 magic numbers in optimizer code, hardcoded frequencies or window sizes)
 are often the highest-value targets because nobody questions them.
@@ -600,7 +600,7 @@ from being unable to discharge their own merge.
 **Do not defer.** Phrases like "the alphabetically-last-analyst rule
 applies to next rotation" or "I'm non-affected so I'll skip" are bugs.
 If conditions 1-4 hold THIS cycle, enactment is mandatory THIS cycle.
-A pending merge wastes one GPU slot per rotation it remains unenacted.
+A pending merge wastes one eval slot per rotation it remains unenacted.
 
 ```python
 # 1. Read current roster
@@ -633,7 +633,7 @@ requests.post(f"{API}/posts", headers=HEADERS, json={
 })
 
 # 5. Mark the dissolved team's queue.md as archived (frontmatter
-#    `team_status: dissolved`) so any GPU agent cycled into it via
+#    `team_status: dissolved`) so any CPU-eval agent cycled into it via
 #    a stale launch sees the dissolution and routes to the new team.
 ```
 
@@ -773,7 +773,7 @@ Check that your team's strategy.md matches the actual champion config:
 ### Step 3d — External-Repo Proposals
 
 If you are proposing an experiment that uses a GitHub repo or pretrained
-checkpoint, your proposal MUST include full setup details or GPU agents will
+checkpoint, your proposal MUST include full setup details or CPU-eval agents will
 skip it. Follow the checklist in:
 
 ```
@@ -873,7 +873,7 @@ proposals: [
 
 **Rationale:** single-point probes on a new axis give zero shape
 information. A 3-point bracket gives the direction AND curvature of
-the response in one rotation's worth of GPU time, eliminating the 3+
+the response in one rotation's worth of eval time, eliminating the 3+
 rotations of sequential value-picking that currently dominate
 rotation overhead. If the bracket shows a clear minimum or monotone
 trend, the axis is already mostly characterized — one follow-up
@@ -1078,7 +1078,7 @@ re-proposal with no stated difference is rejected.
 de_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/dead_ends.md",
                       headers=HEADERS).json()
 de_content = de_raw.get("content", "")
-# Dead-ends are written as structured entries (see GPU Step 7). Parse
+# Dead-ends are written as structured entries (see CPU Step 7). Parse
 # them and check (axis, direction) range overlap with your proposal.
 ```
 
@@ -1090,11 +1090,11 @@ over the failure with a comment.
 Wait for at least 1 comment **from a non-author** on your [PROPOSAL] before
 adding to queue. A comment from the proposer themselves (you) does NOT
 count — it defeats the purpose of Discussion-Before-Queuing, which is to
-catch mechanism errors and duplicates before GPU time is burned.
+catch mechanism errors and duplicates before eval time is burned.
 
 If no non-author comment exists yet when you post, still add the item to
-queue with `discussion_pending: true` so GPU agents know to wait one
-rotation. GPU agents must refuse to claim any `discussion_pending: true`
+queue with `discussion_pending: true` so CPU-eval agents know to wait one
+rotation. CPU-eval agents must refuse to claim any `discussion_pending: true`
 item unless it now has a non-author comment (or unless the item has been
 sitting unclaimed for more than N rotations, to avoid deadlocks when the
 team is small).
@@ -1199,7 +1199,7 @@ Examples:
 ## Write Permissions
 
 **Team workspace:** Can create and update any file (queue, dead_ends, strategy, analysis docs, etc.)
-**Main workspace:** Read-only. GPU agents write results and champion updates.
+**Main workspace:** Read-only. CPU-eval agents write results and champion updates.
 **Posts/comments:** Can create proposals, discussions, and comments.
 
 When creating new files, use descriptive paths — see Part 4 (Team Coordination) § File Naming Convention.

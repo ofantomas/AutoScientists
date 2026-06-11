@@ -243,7 +243,7 @@ def meta_improve(cycle_count):
     # ── Step 3: Identify ONE concrete improvement and APPLY IT ──────────────
     # Do NOT just write a report. Read the target file, edit it, save it.
     role_analyst = FOCUS_ROOT / "system" / "templates" / "ROLE-ANALYST.md"
-    role_gpu     = FOCUS_ROOT / "system" / "templates" / "ROLE-GPU.md"
+    role_cpu     = FOCUS_ROOT / "system" / "templates" / "ROLE-CPU.md"
     applied      = False
     pattern      = "none"
 
@@ -280,11 +280,11 @@ def meta_improve(cycle_count):
             "After a KEEP, immediately post [INSPIRATION] to the workshop notifying ALL agents.\n"
             "Include: exp_id, metric delta, mechanism summary, suggested follow-ups.\n"
         )
-        content = role_gpu.read_text()
+        content = role_cpu.read_text()
         if "Step 8b" not in content:
-            role_gpu.write_text(content + block)
+            role_cpu.write_text(content + block)
             applied = True
-            print("  ✓ Added Step 8b broadcast to ROLE-GPU.md")
+            print("  ✓ Added Step 8b broadcast to ROLE-CPU.md")
 
     elif diagnostics.has_low_keep_rate:
         pattern = "low_keep_rate"

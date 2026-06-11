@@ -556,18 +556,18 @@ if len(PREFIX) > 16:
     PREFIX = PREFIX[:6] + PREFIX[-10:]
 
 # Agent roster: name -> (description, role, server, gpu)
-# NOTE: the `_gpuN` agent NAMES are retained (LAUNCH.md gpu_dispatch / periodic_hooks
-# reference `f"{PREFIX}_gpu{i}" for i in range(1, 7)`), but for the sella CPU-eval task
-# their role is "cpu" and they carry no device index (gpu = -1). The "cpu" role loads the
-# converted (CPU-eval) ROLE-GPU.md via role_file_map below.
+# NOTE: the experiment-running agents are CPU-eval agents — their names are now
+# `_cpuN` (LAUNCH.md cpu_dispatch / periodic_hooks reference
+# `f"{PREFIX}_cpu{i}" for i in range(1, 7)`). Their role is "cpu" and they carry no
+# device index (gpu = -1). The "cpu" role loads ROLE-CPU.md via role_file_map below.
 AGENTS = {
     f"{PREFIX}_monitor":    ("Focus area monitor — bootstraps, forms teams, monitors health",   "monitor",   "server1", -1),
-    f"{PREFIX}_gpu1":     ("CPU-eval agent 1 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
-    f"{PREFIX}_gpu2":     ("CPU-eval agent 2 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
-    f"{PREFIX}_gpu3":     ("CPU-eval agent 3 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
-    f"{PREFIX}_gpu4":     ("CPU-eval agent 4 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
-    f"{PREFIX}_gpu5":     ("CPU-eval agent 5 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
-    f"{PREFIX}_gpu6":     ("CPU-eval agent 6 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
+    f"{PREFIX}_cpu1":     ("CPU-eval agent 1 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_cpu2":     ("CPU-eval agent 2 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_cpu3":     ("CPU-eval agent 3 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_cpu4":     ("CPU-eval agent 4 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_cpu5":     ("CPU-eval agent 5 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
+    f"{PREFIX}_cpu6":     ("CPU-eval agent 6 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
     f"{PREFIX}_analyst1": ("Analyst 1 — researches mechanisms, proposes experiments",        "analyst", "server1", -1),
     f"{PREFIX}_analyst2": ("Analyst 2 — researches mechanisms, proposes experiments",        "analyst", "server2", -1),
     f"{PREFIX}_analyst3": ("Analyst 3 — researches mechanisms, proposes experiments",        "analyst", "server3", -1),
@@ -654,12 +654,12 @@ last_fitness: null
 
     # Inject role-specific content
     role_file_map = {
-        "gpu": "ROLE-GPU.md",
-        "cpu": "ROLE-GPU.md",   # CPU-eval agents use the converted (CPU-eval) ROLE-GPU.md
+        "gpu": "ROLE-CPU.md",   # legacy "gpu" role also maps to the CPU-eval doc
+        "cpu": "ROLE-CPU.md",   # CPU-eval agents use ROLE-CPU.md
         "analyst": "ROLE-ANALYST.md",
         "monitor": "ROLE-MONITOR.md",
     }
-    role_src = system_dir / role_file_map.get(role, "ROLE-GPU.md")
+    role_src = system_dir / role_file_map.get(role, "ROLE-CPU.md")
     role_content = role_src.read_text() if role_src.exists() else ""
     # Strip frontmatter from role doc (already in heartbeat)
     role_parts = role_content.split("---")
@@ -687,7 +687,7 @@ last_fitness: null
 
     (agent_dir / "HEARTBEAT.md").write_text(heartbeat)
 
-    # Copy the baseline code repo for experiment-running agents (GPU or CPU-eval),
+    # Copy the baseline code repo for experiment-running agents (CPU-eval),
     # optional - only if a repo source exists.
     if role in ("gpu", "cpu"):
         dst = agent_dir / "workspace" / "repo"

@@ -142,7 +142,7 @@ for agent_name in non_admin_agents:
 > environment." Always use **sonnet or opus** for analysts; reserve haiku for
 > deterministic mechanical work outside this loop.
 
-**`MODE=discussion` is mandatory.** Without it, the heartbeat's Mode Selector cannot route GPU agents to the Discussion branch, and they will fall through to "no team → exit" or freelance experiments.
+**`MODE=discussion` is mandatory.** Without it, the heartbeat's Mode Selector cannot route CPU-eval agents to the Discussion branch, and they will fall through to "no team → exit" or freelance experiments.
 
 **Expected duration: 3–8 minutes per agent.** All agents post one [DISCUSSION] thread and exit. If any agent runs longer than 15 minutes during discussion phase, something is wrong (likely an old heartbeat or the agent skipped Part 0) — investigate before proceeding.
 
@@ -189,7 +189,7 @@ while True:
         break
 
     # 5b — Launch analysts in parallel (Step 5b below)
-    # 5c — Launch GPU agents (Step 5c below)
+    # 5c — Launch CPU-eval agents (Step 5c below)
     # 5d — Wait + log (Step 5d below)
     # 5e — Champion promotion (Step 5e below)
     # 5f — Health check (Step 5f below)
@@ -235,12 +235,12 @@ for analyst_name in analysts:
 
 → PROFILE HOOK: `analyst_prompt_extras` (extra env vars, deadline reminders, diversity rules — append to the prompt)
 
-### 5c. Launch GPU agents
+### 5c. Launch CPU-eval agents
 
-→ PROFILE HOOK: `gpu_dispatch` (REQUIRED — defines sequential vs parallel, CUDA assignment, mixed dispatch, etc.)
+→ PROFILE HOOK: `cpu_dispatch` (REQUIRED — defines sequential vs parallel, CUDA assignment, mixed dispatch, etc.)
 
 This is the biggest variation between profiles, so the entire body lives in the profile. Common rules:
-- Never launch two GPU agents on the same physical GPU at the same time.
+- Never launch two CPU-eval agents on the same physical GPU at the same time.
 - Always set `MODE=execute` in the prompt.
 - Each agent reads its own HEARTBEAT.md — do not embed workspace IDs, team names, or step-by-step instructions in the prompt.
 

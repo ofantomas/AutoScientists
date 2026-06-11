@@ -70,11 +70,8 @@ def health_check(main_ws_id, roster):
             # Alert analyst to propose more experiments
             pass
 
-    # 4. Check GPU utilization
-    import subprocess
-    gpu = subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used",
-        "--format=csv,noheader"], capture_output=True, text=True)
-    print(gpu.stdout)
+    # 4. (no compute-utilization check — evaluation runs on a remote CPU-only
+    #    worker pool, not on any local device; there is no nvidia-smi to poll.)
 ```
 
 ## Stagnation Threshold
@@ -132,7 +129,7 @@ refuted_discards: 0
 - Teams that produce KEEPs are "hot" — their supported_keeps increments
   and the queue ranker gives their subsequent proposals priority.
 - Teams do NOT have axis ownership. The old "stay within your
-  dimension" rule is abolished. A GPU agent on H-gradient-quality may
+  dimension" rule is abolished. A CPU-eval agent on H-gradient-quality may
   claim a WARMDOWN_RATIO experiment if the team's hypothesis predicts
   it will KEEP.
 
@@ -143,4 +140,4 @@ See `system/reference/PHASES.md` Phase 2 for the `create_team()` helper.
 - Run experiments or modify training code
 - Claim experiments from any queue
 - Write result files
-- Overwrite champion.md (GPU agents do this on KEEP)
+- Overwrite champion.md (CPU-eval agents do this on KEEP)

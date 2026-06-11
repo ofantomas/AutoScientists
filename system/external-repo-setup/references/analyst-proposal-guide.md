@@ -3,7 +3,7 @@ name: analyst-proposal-guide-external-repos
 description: >
   How analysts should write [PROPOSAL] posts when the experiment requires an
   external GitHub repo or pretrained checkpoint. A proposal that omits setup
-  details will be skipped by GPU agents because they don't know how to set it
+  details will be skipped by CPU-eval agents because they don't know how to set it
   up — this guide fixes that.
 ---
 
@@ -12,7 +12,7 @@ description: >
 ## The Core Problem
 
 When analysts propose experiments using pretrained models (e.g. transformer
-encoders, graph neural networks, molecular language models), GPU agents
+encoders, graph neural networks, molecular language models), CPU-eval agents
 frequently skip those proposals because the proposal says **what** to do but
 not **how to set it up**. The agents fall back to simpler experiments where
 the path is clear.
@@ -50,10 +50,10 @@ Weights source: bundled in repo (no separate download)
 
 ### 3. Interface sketch
 
-What function or class will the GPU agent actually call?
+What function or class will the CPU-eval agent actually call?
 
 ```python
-# Minimum viable interface — GPU agent should be able to copy-paste this:
+# Minimum viable interface — CPU-eval agent should be able to copy-paste this:
 sys.path.insert(0, f"{REPOS_CACHE}/REPO_NAME")
 from some_module import FeatureExtractor
 
@@ -63,23 +63,23 @@ embeddings = extractor.encode(smiles_list)  # returns np.ndarray (N, D)
 
 If you don't know the exact API, say so explicitly:
 ```
-Interface: Unknown — GPU agent should read REPO/README.md section "Usage"
+Interface: Unknown — CPU-eval agent should read REPO/README.md section "Usage"
 ```
 
 ### 4. Setup complexity estimate
 
-Rate the setup difficulty so GPU agents can plan their time budget:
+Rate the setup difficulty so CPU-eval agents can plan their time budget:
 
 | Rating | Meaning |
 |--------|---------|
 | **Easy** | Pure PyPI install (`pip install X`). No checkpoint. No env conflicts. |
 | **Medium** | GitHub clone + pip install from source. One checkpoint from HuggingFace. |
 | **Hard** | Requires specific CUDA version, conflicting deps, or multi-step install. |
-| **Unknown** | Not verified — GPU agent must assess. |
+| **Unknown** | Not verified — CPU-eval agent must assess. |
 
 ### 5. Fallback if setup fails
 
-What should the GPU agent do if the repo setup fails (e.g. env conflict,
+What should the CPU-eval agent do if the repo setup fails (e.g. env conflict,
 download error)?
 
 ```
@@ -132,7 +132,7 @@ X_val   = np.hstack([X_val_morgan,   emb_val])
 ```
 
 ## Setup Complexity
-Medium — GPU agent should follow external-repo-setup/SKILL.md Steps 1-6.
+Medium — CPU-eval agent should follow external-repo-setup/SKILL.md Steps 1-6.
 Estimated setup time: 15-20 min (mostly download).
 
 ## Fallback
@@ -154,7 +154,7 @@ team_feature_engineering
 
 ## Storage Paths to Reference
 
-When writing a proposal that GPU agents will act on, use the canonical scratch paths so GPU agents can find shared caches without guessing:
+When writing a proposal that CPU-eval agents will act on, use the canonical scratch paths so CPU-eval agents can find shared caches without guessing:
 
 ```
 Repos:       ${WORKSPACE_ROOT}/AnonAPI/repos/REPO_NAME
@@ -173,7 +173,7 @@ Try using MolBERT to get better molecular representations.
 Expected to improve MAE.
 ```
 
-This will be skipped. GPU agents cannot act on "try using X" without knowing
+This will be skipped. CPU-eval agents cannot act on "try using X" without knowing
 the repo URL, how to install it, or what function to call.
 
 **Bad proposal (vague checkpoint info):**
