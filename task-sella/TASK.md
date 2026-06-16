@@ -31,3 +31,20 @@ correctness first, then speed.
 Each candidate `algo.py` is evaluated on a fixed molecule set; the evaluator returns `fitness`,
 `is_valid`, `mean_rel_steps`, and `max_final_energy_delta_kcal_mol`. A result counts as an
 improvement only if it is **valid AND** has lower `fitness` than the current best.
+
+## The convergence test (fixed and external — read it, don't try to change it)
+`converged(...)` is passed into `minimize_func`. It is the SHARED, FIXED stopping rule used to score
+**every** algorithm identically — it lives outside `algo.py` on purpose, so different optimizers are
+compared on equal footing. You **cannot** edit it and must not try. But you SHOULD read and understand
+it, because your entire job is to make each molecule satisfy *this exact test* in as few force calls as
+possible. A step converges (xTB mode) only once **all five** of these hold between consecutive steps:
+
+- energy change `|ΔE| < 5e-6` Hartree
+- max gradient component `g_max < 3e-4` (Hartree/Bohr)
+- RMS gradient `g_rms < 1e-4`
+- max displacement `d_max < 4e-3` Bohr
+- RMS displacement `d_rms < 2e-3` Bohr
+
+(The first step never converges — there's no previous point to compare to.) Your lever is the
+**trajectory**: step direction/size, curvature/preconditioning — especially for the slowest
+molecules — so each one enters this five-way tolerance band sooner.

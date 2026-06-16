@@ -189,9 +189,10 @@ is_valid       = int(score.get("is_valid", 0)) == 1
 cand_fitness   = float(score["fitness"])
 have_champion  = champion_fitness is not None
 
-if is_valid and (not have_champion or cand_fitness < champion_fitness):
+if is_valid and (not have_champion or (champion_fitness - cand_fitness) >= 1e-3):
     # SEEDING: first valid candidate promoted regardless of fitness.
-    # THEREAFTER: strict improvement (cand_fitness < champion_fitness) among valid candidates only.
+    # THEREAFTER: promote only on a real margin (>= 1e-3 mean_rel_steps); sub-margin
+    # "wins" are noise-level and just make the champion crawl.
     outcome = "KEEP"
 else:
     outcome = "DISCARD"   # invalid candidates and non-improving valid candidates are discarded

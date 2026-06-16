@@ -778,16 +778,6 @@ updated_at: "{NOW}"
 (to be identified)
 """)
 
-    put_file(ws_id, "knowledge/exhausted.md", f"""---
-count: 0
-updated_at: "{NOW}"
----
-
-# Exhausted Axes
-
-(none yet)
-""")
-
     put_file(ws_id, "teams/roster.md", f"""---
 teams: {{}}
 updated_at: "{NOW}"

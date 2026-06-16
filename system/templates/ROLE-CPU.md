@@ -549,7 +549,10 @@ cand_valid = (score is not None) and (int(score.get("is_valid", 0)) == 1)
 # `status: awaiting_baseline` or a missing/None metric_value ⇒ no valid champion.
 champ_status   = fresh_champ.get("status")
 champ_fitness  = fresh_champ.get("metric_value")
-have_valid_champion = (champ_status not in ("awaiting_baseline", None)) and \
+# Only an explicit `awaiting_baseline` status means "no champion yet". A normal champion.md has
+# NO status field (champ_status is None) — the champ_fitness check below is what gates emptiness.
+# (Treating None status as no-champion seeds ANY valid candidate over a real champion — a bug.)
+have_valid_champion = (champ_status != "awaiting_baseline") and \
                       (champ_fitness is not None) and (float(champ_fitness) < 1000.0)
 current_best = float(champ_fitness) if have_valid_champion else None
 
@@ -564,16 +567,18 @@ diff_applied = bool(item.get("diff_applied", True))  # default True for legacy i
 #   * Invalid candidate (is_valid==0 / fitness==1000.0)        → DISCARD.
 #   * No VALID champion yet → first VALID candidate is a KEEP   (SEEDING),
 #     regardless of its fitness.
-#   * Otherwise KEEP iff VALID and STRICTLY lower fitness than the champion.
-# Eval is deterministic — no multi-seed gate, no noise band. A strictly-lower
-# fitness among valid candidates is a real, reproducible improvement.
+#   * Otherwise KEEP iff VALID and fitness lower by at least KEEP_MARGIN.
+# Eval is deterministic, but we still require a real margin to promote: sub-margin
+# "wins" are noise-level and just make the champion crawl. KEEP_MARGIN is in
+# mean_rel_steps units (1e-3 ≈ 0.1% fewer relative force calls).
+KEEP_MARGIN = 1e-3
 if not diff_applied:
     outcome = "FAILED"
 elif not cand_valid:
     outcome = "DISCARD"          # invalid candidates are worthless: correctness first
 elif not have_valid_champion:
     outcome = "KEEP"             # SEEDING: first valid candidate seeds the champion
-elif our_metric < current_best:  # STRICT less-than; lower fitness is better
+elif (current_best - our_metric) >= KEEP_MARGIN:  # require >= 1e-3 real improvement
     outcome = "KEEP"
 else:
     outcome = "DISCARD"
@@ -727,9 +732,22 @@ timestamp: {datetime.now(timezone.utc).isoformat()}
 - Source: {FOCUS_ROOT}/champion/algo.py
 """
 
-requests.put(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
-    headers={**HEADERS, "If-Match": str(current_version)},
-    json={"content": champion_content})
+# PRE-PUT FITNESS GATE (REQUIRED — If-Match is NOT reliably enforced server-side, so a stale-If-Match
+# PUT can silently OVERWRITE a better concurrent champion). Re-read champion.md fresh right before the
+# PUT and ABORT if it already holds an equal-or-better fitness than ours — the post-PUT Step-7b1 exp_id
+# guard cannot catch this (our own PUT would have just written our exp_id).
+_pre_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md", headers=HEADERS).json()
+_pre = parse_frontmatter(_pre_raw); _pre_best = _pre.get("metric_value")
+current_version = _pre_raw.get("version", current_version)  # freshest version for If-Match
+# minimize task: promote ONLY if strictly lower than the current champion.
+if _pre_best is not None and float(champion_metric) >= float(_pre_best):
+    # An equal/better champion landed during our eval -> do NOT PUT (would clobber) and SKIP Step 7b1.
+    # Re-queue our change as `{exp_id}_stack` to re-test on the new champion, then go to Step 7c.
+    print(f"PRE-PUT ABORT: champion.md now {_pre.get('experiment_id')} ({_pre_best}) <= ours {champion_metric}; re-queue {exp_id}_stack, do NOT overwrite or copy algo.py.")
+else:
+    requests.put(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
+        headers={**HEADERS, "If-Match": str(current_version)},
+        json={"content": champion_content})
 ```
 
 #### Step 7b1 — Propagate champion/algo.py — REQUIRED on KEEP
@@ -744,6 +762,17 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+# RACE GUARD (REQUIRED, do this FIRST): copy algo.py ONLY if champion.md still records OUR exp_id.
+# Step 5's current_best check does NOT catch a race where two agents both pass Step 5 on the OLD
+# champion before either promotes: the loser's If-Match champion.md PUT 409s, but if it copies
+# algo.py anyway it CLOBBERS the winner (champion.md=them, champion/algo.py=us).
+_champ_now = parse_frontmatter(requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md", headers=HEADERS).json())
+if _champ_now.get("experiment_id") != exp_id:
+    # LOST the race -> do NOT run the copy below and do NOT append SOURCE. Re-queue our validated
+    # change as `{exp_id}_stack` to re-test on the NEW champion/algo.py, then go to Step 7c.
+    # SKIP the rest of this code block.
+    print(f"CHAMPION RACE LOST -> re-queue {exp_id}_stack (champion.md now {_champ_now.get('experiment_id')})")
+# (Everything below runs ONLY if we WON the race -- champion.md records our exp_id.)
 # Atomic write: temp-then-rename so concurrent KEEPs cannot half-overwrite.
 src = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/algo_{exp_id}.py")
 dst = Path(f"{FOCUS_ROOT}/champion/algo.py")
@@ -758,10 +787,11 @@ with src_log.open("a") as f:
     f.write(f"{exp_id} {our_metric:.6f} {AGENT_NAME} {ts}\n")
 ```
 
-**Race-safety:** if multiple cpu-eval agents land KEEPs in the same rotation, the champion.md
-PUT serializes them via If-Match — only one wins. The losing agent's `our_metric < current_best`
-check at the top of Step 5 will already have failed (champion changed during their eval),
-so they will not enter Step 7b1. The winning agent's `tmp.replace(dst)` is atomic.
+**Race-safety:** if multiple cpu-eval agents land KEEPs in the same rotation, the champion.md PUT is
+*supposed* to serialize them via If-Match — but If-Match is NOT reliably enforced server-side, so the
+real protection is the **PRE-PUT FITNESS GATE** (Step 7b: re-read champion.md, abort if an equal/better
+one already landed) plus the **RACE GUARD** at the top of Step 7b1 (copy algo.py only if champion.md
+records THIS exp_id). A loser re-queues its change as `{exp_id}_stack`. The winner's `tmp.replace(dst)` is atomic.
 
 **Why this exists:** the champion file is the baseline every subsequent experiment's
 diff is applied against. A several-KEEP-deep stale champion file means agents who don't know

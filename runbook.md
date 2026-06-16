@@ -130,7 +130,7 @@ for agent_name in non_admin_agents:
             f"{extra_discussion_instructions}"   # from the profile hook
         ),
         run_in_background=True,
-        model="sonnet"
+        # model unset → inherit the orchestrator (opus). Run everything on opus-4.8.
     )
 ```
 
@@ -218,7 +218,8 @@ analysts = [f"{PREFIX}_analyst{i}" for i in (1, 2, 3)]
 for analyst_name in analysts:
     Task(
         subagent_type="general-purpose",
-        model="sonnet",
+        # model unset on purpose → inherit the orchestrator's model (opus). Analysts do the
+        # creative hypothesis/proposal work — the hardest job — so they get the stronger model.
         description=f"{analyst_name} cycle",
         prompt=(
             f"You are {analyst_name}.\n"

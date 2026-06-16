@@ -69,8 +69,12 @@ def main() -> int:
         score["duration_s"] = time.time() - start
         score["num_results"] = len(result["results"])
         score["num_errors"] = result["num_errors"]
-        if result["results"]:
-            score["per_molecule"] = per_molecule_summary(result["results"])
+        # Per-molecule summary intentionally DISABLED for this run: the agent sees only the
+        # aggregate score (parity with the canonical autoresearch / ProteinGym coarseness, and a
+        # test of whether per-molecule guidance actually helped or just funnelled the swarm onto
+        # the single stiff molecule). Re-enable by uncommenting; per_molecule_summary() is kept above.
+        # if result["results"]:
+        #     score["per_molecule"] = per_molecule_summary(result["results"])
     except Exception as exc:  # surface harness/Redis failures as machine-readable JSON
         print(json.dumps({
             "fitness": 1000.0,
