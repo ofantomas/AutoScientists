@@ -2,9 +2,10 @@
 """Evaluate ONE candidate algo.py against a running Redis-backed worker pool.
 
 Prints the score dict as a single JSON object on stdout (last line). The score is
-identical to validate() (it reuses Evaluator + score_results), plus an additional
-`per_molecule` field summarizing where the optimizer struggles — so analysts can
-target proposals at specific molecule regimes instead of the 250-molecule average.
+identical to validate() (it reuses Evaluator + score_results). The per-molecule
+summary is intentionally DISABLED for this run — agents receive ONLY the aggregate
+score (fitness / is_valid / mean_rel_steps / max_final_energy_delta), no per-molecule
+breakdown.
 
 Run from the opt_problem repo root (branch ralph-autoresearch-sella-baseline).
 

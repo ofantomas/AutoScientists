@@ -650,27 +650,7 @@ Step 0.25 cold-start bootstrap.
 **Why:** this breaks a deadlock where neither the affected nor the non-affected
 analysts enact the merge — so the enactor is explicitly NOT required to be affected.
 
-If none of the conditions hold, this step is a no-op — proceed to Step 1e.
-
-### Step 1e — Per-Molecule Diagnostics — analyze before proposing
-
-`fitness` (`mean_rel_steps`) averages over 250 molecules and hides where the optimizer
-actually struggles. Every eval result carries a `per_molecule` summary (in the score JSON /
-`results/<exp_id>.md`): for the worst molecules it lists `rel_steps` (steps vs baseline) and
-`energy_delta_kcal_mol` (headroom to the 1.0 kcal/mol validity gate), plus any `non_converged`.
-Read it for the champion and recent candidates, and let it shape your proposals:
-
-- **`worst_by_rel_steps`** — molecules far above baseline steps are where the budget is spent.
-  Target mechanisms (step control, curvature model, line search, convergence criterion) that
-  help THAT regime, not the average.
-- **`nearest_energy_gate`** — molecules with `energy_delta_kcal_mol` near 1.0 are near-invalid;
-  an aggressive step/accept change that lowers mean steps but pushes these over the gate will be
-  DISCARDed. Note the tension in the proposal.
-- **`non_converged`** — molecules that hit `max_steps` are a distinct failure class; a proposal
-  that fixes convergence there can KEEP without touching the easy molecules.
-
-Name the molecule regime your proposal targets and the per-molecule signal motivating it.
-Proceed to Step 2.
+If none of the conditions hold, this step is a no-op — proceed to Step 2.
 
 ### Step 2 — Prune Dead Ends
 
