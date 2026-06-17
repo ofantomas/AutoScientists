@@ -2,10 +2,13 @@
 """Evaluate ONE candidate algo.py against a running Redis-backed worker pool.
 
 Prints the score dict as a single JSON object on stdout (last line). The score is
-identical to validate() (it reuses Evaluator + score_results). The per-molecule
-summary is intentionally DISABLED for this run — agents receive ONLY the aggregate
-score (fitness / is_valid / mean_rel_steps / max_final_energy_delta), no per-molecule
-breakdown.
+identical to validate() (it reuses Evaluator + score_results), plus two extra fields:
+  - `per_molecule`         — the FULL per-molecule table (one row per molecule), mirroring
+                             opt_problem's run.log columns so the orchestrator can render a
+                             run.log-style per-experiment view.
+  - `per_molecule_summary` — a compact view (worst-by-steps / nearest-energy-gate / non-converged).
+Both are advisory: agents may use them to reason about specific molecule regimes / chemistry
+instead of the 250-molecule average, but are not required to (see ROLE-ANALYST Step 1e).
 
 Run from the opt_problem repo root (branch ralph-autoresearch-sella-baseline).
 
@@ -44,6 +47,22 @@ def per_molecule_summary(results: list[dict]) -> dict:
     }
 
 
+def per_molecule_full(results: list[dict]) -> list[dict]:
+    """Full per-molecule table — one row per molecule, columns mirroring opt_problem's run.log
+    (`molecule n_steps max_steps rel_steps rel_energy energy_delta_kcal_mol conv`). Eval is
+    deterministic, so these reproduce exactly. Sorted by molecule name (None last) for stable diffs."""
+    rows = [{
+        "mol": r.get("mol_name"),
+        "n_steps": r.get("n_steps"),
+        "max_steps": r.get("max_steps"),
+        "rel_steps": round(float(r.get("rel_steps", 0.0)), 6),
+        "rel_energy": round(float(r.get("rel_energy", 0.0)), 6),
+        "energy_delta_kcal_mol": round(float(r.get("energy_delta_kcal_mol", 0.0)), 6),
+        "converged": int(bool(r.get("converged"))),
+    } for r in results]
+    return sorted(rows, key=lambda x: (x["mol"] is None, x["mol"] or ""))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate one candidate algo.py -> JSON score (+ per-molecule summary)")
     parser.add_argument("--program", required=True, help="Path to candidate algo.py")
@@ -70,12 +89,14 @@ def main() -> int:
         score["duration_s"] = time.time() - start
         score["num_results"] = len(result["results"])
         score["num_errors"] = result["num_errors"]
-        # Per-molecule summary intentionally DISABLED for this run: the agent sees only the
-        # aggregate score (parity with the canonical autoresearch / ProteinGym coarseness, and a
-        # test of whether per-molecule guidance actually helped or just funnelled the swarm onto
-        # the single stiff molecule). Re-enable by uncommenting; per_molecule_summary() is kept above.
-        # if result["results"]:
-        #     score["per_molecule"] = per_molecule_summary(result["results"])
+        # Per-molecule breakdown — RE-ENABLED for sella-run5 (was disabled in sella-run4 as an
+        # ablation testing whether per-molecule guidance funnels the swarm onto the single stiff
+        # molecule). Emit BOTH the full table (run.log parity) and the compact summary. Advisory
+        # only — see ROLE-ANALYST Step 1e. To revert to the aggregate-only ablation, comment out
+        # the two assignments below.
+        if result["results"]:
+            score["per_molecule"] = per_molecule_full(result["results"])
+            score["per_molecule_summary"] = per_molecule_summary(result["results"])
     except Exception as exc:  # surface harness/Redis failures as machine-readable JSON
         print(json.dumps({
             "fitness": 1000.0,

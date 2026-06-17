@@ -32,6 +32,12 @@ Each candidate `algo.py` is evaluated on a fixed molecule set; the evaluator ret
 `is_valid`, `mean_rel_steps`, and `max_final_energy_delta_kcal_mol`. A result counts as an
 improvement only if it is **valid AND** has lower `fitness` than the current best.
 
+## Per-molecule data (optional)
+Aggregate `fitness` hides which molecules are slow or near the energy gate. Two read-only resources
+let you reason per molecule if useful (advisory — not required): `logs/run_log.md` has the full
+per-molecule table for every experiment (autoresearch `run.log` format), and `task/molecule_smiles.tsv`
+maps each `mol_id` to its name / formula / SMILES.
+
 ## The convergence test (fixed and external — read it, don't try to change it)
 `converged(...)` is passed into `minimize_func`. It is the SHARED, FIXED stopping rule used to score
 **every** algorithm identically — it lives outside `algo.py` on purpose, so different optimizers are

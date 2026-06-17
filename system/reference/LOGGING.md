@@ -44,6 +44,9 @@ Every action in the system is logged for full traceability.
 ├── logs/
 │   ├── experiments.jsonl       ← CANONICAL (orchestrator writes)
 │   ├── sessions.jsonl          ← One line per agent session (orchestrator writes)
+│   ├── molecule_results/
+│   │   └── {agent}.jsonl       ← Per-molecule eval records, one per eval (CPU agent appends own shard)
+│   ├── run_log.md              ← Consolidated per-molecule view, autoresearch run.log format (orchestrator rebuilds each cycle)
 │   └── raw/
 │       └── {agent}_{timestamp}.log  ← Raw stdout/stderr per session
 │
@@ -56,6 +59,16 @@ Every action in the system is logged for full traceability.
 ```
 
 These are all useful for context but `experiments.jsonl` is the one the stagnation check reads.
+
+### Per-molecule results (`molecule_results/` + `run_log.md`)
+
+Advisory per-molecule diagnostics, mirroring the opt_problem autoresearch `run.log`. Each CPU-eval
+agent appends one JSON record per eval to **its own** shard `logs/molecule_results/{agent}.jsonl`
+(full per-molecule table from `eval_candidate.py` — `mol, n_steps, max_steps, rel_steps, rel_energy,
+energy_delta_kcal_mol, converged`, plus `exp_id`, `description`, `outcome`, aggregate metrics).
+Per-agent shards mean concurrent CPU agents never contend on one file. Each cycle the orchestrator
+(runbook Step 5d-bis) rebuilds `logs/run_log.md` fresh from all shards into a human-readable,
+per-experiment table. Analysts may consult these (ROLE-ANALYST Step 1e) but are not required to.
 
 ## 1. sessions.jsonl — Session Tracking
 

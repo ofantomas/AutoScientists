@@ -520,6 +520,13 @@ Check these from the score dict:
    of molecules whose convergence check passed). A low `mean_rel_steps` with `converged == 1.0` and
    low energy delta is the ideal profile.
 
+4. **Per-molecule breakdown (available, optional).** The score dict carries a full `per_molecule`
+   table and a compact `per_molecule_summary` (worst-by-steps / nearest-energy-gate / non-converged).
+   You may glance at `per_molecule_summary` to note in the result file which molecules dominated the
+   step budget or sat near the 1.0 kcal/mol gate — useful colour for analysts. This is advisory; you
+   are not required to act on it. (You record the full table to your shard in Step 5; the orchestrator
+   merges all shards into `logs/run_log.md`.)
+
 Include these diagnostics in every result file under an `## Eval Diagnostics` section. Analysts use
 this to understand WHY a KEEP worked (or why a fast candidate was invalid), not just that it did.
 
@@ -587,6 +594,32 @@ else:
 # minimize task). Used in the [RESULT] post, champion.md, dead_ends, and SOURCE.
 # No valid champion to compare against ⇒ delta is undefined (0.0 placeholder).
 delta = (our_metric - current_best) if (our_metric is not None and current_best is not None) else 0.0
+```
+
+**Append the per-molecule breakdown to THIS agent's shard.** `eval_candidate.py` now returns a
+full `per_molecule` table in the score dict (one row per molecule: `mol, n_steps, max_steps,
+rel_steps, rel_energy, energy_delta_kcal_mol, converged`). Record it so analysts can see where the
+optimizer spends steps and which molecules sit near the energy gate (advisory — see Step 4b). Each
+agent writes ONLY its own file, so concurrent CPU agents never contend; the orchestrator
+consolidates all shards into `logs/run_log.md` each cycle.
+```python
+import json, os
+from datetime import datetime, timezone
+
+mdir = f"{FOCUS_ROOT}/logs/molecule_results"
+os.makedirs(mdir, exist_ok=True)
+mol_record = {
+    "ts": datetime.now(timezone.utc).isoformat(),
+    "exp_id": exp_id, "agent": AGENT_NAME, "team": MY_TEAM,
+    "description": description, "outcome": outcome,
+    "fitness":        (score or {}).get("fitness"),
+    "is_valid":       (score or {}).get("is_valid"),
+    "mean_rel_steps": (score or {}).get("mean_rel_steps"),
+    "max_final_energy_delta_kcal_mol": (score or {}).get("max_final_energy_delta_kcal_mol"),
+    "per_molecule":   (score or {}).get("per_molecule", []),   # full table from eval_candidate.py
+}
+with open(f"{mdir}/{AGENT_NAME}.jsonl", "a") as f:   # append-only; one JSON record per eval
+    f.write(json.dumps(mol_record) + "\n")
 ```
 
 Write to **main workspace** (visible to all teams):

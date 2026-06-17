@@ -262,6 +262,49 @@ with open(FOCUS_ROOT / "logs" / "sessions.jsonl", "a") as f:
     f.write(json.dumps(session) + "\n")
 ```
 
+### 5d-bis. Consolidate per-molecule results → run_log.md
+
+Each CPU-eval agent appends one record per eval to its own shard
+`logs/molecule_results/<agent>.jsonl` (full per-molecule table from the eval). Rebuild the
+human-readable `logs/run_log.md` fresh from every shard each cycle (idempotent). This mirrors
+the opt_problem `run.log` so analysts get the same per-experiment per-molecule view they would
+in autoresearch. Advisory diagnostics only — the canonical result ledger is still
+`experiments.jsonl`.
+
+```python
+import json
+from pathlib import Path
+
+shard_dir = FOCUS_ROOT / "logs" / "molecule_results"
+recs = []
+if shard_dir.exists():
+    for shard in sorted(shard_dir.glob("*.jsonl")):
+        for line in shard.read_text().splitlines():
+            if line.strip():
+                try:
+                    recs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass   # never let one malformed shard line abort the rebuild
+recs.sort(key=lambda r: r.get("ts", ""))
+
+out = []
+for r in recs:
+    out.append(f"=== {r.get('ts','')} | {r.get('exp_id','?')} | "
+               f"{r.get('agent','?')}/{r.get('team','?')} | {r.get('outcome','?')} ===")
+    out.append(f"description: {r.get('description','')}")
+    out.append(f"fitness={r.get('fitness')}  is_valid={r.get('is_valid')}  "
+               f"mean_rel_steps={r.get('mean_rel_steps')}  "
+               f"max_final_energy_delta_kcal_mol={r.get('max_final_energy_delta_kcal_mol')}")
+    out.append("mol\tn_steps\tmax_steps\trel_steps\trel_energy\tenergy_delta_kcal_mol\tconv")
+    for m in (r.get("per_molecule") or []):
+        out.append(f"{m.get('mol')}\t{m.get('n_steps')}\t{m.get('max_steps')}\t"
+                   f"{m.get('rel_steps')}\t{m.get('rel_energy')}\t"
+                   f"{m.get('energy_delta_kcal_mol')}\t{m.get('converged')}")
+    out.append("")   # blank line between experiments
+
+(FOCUS_ROOT / "logs" / "run_log.md").write_text("\n".join(out))
+```
+
 ### 5e. Champion promotion
 
 → PROFILE HOOK: `champion_promotion` (REQUIRED — defines what "best" means and what artifacts to copy where)

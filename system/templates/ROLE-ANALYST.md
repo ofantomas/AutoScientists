@@ -650,7 +650,27 @@ Step 0.25 cold-start bootstrap.
 **Why:** this breaks a deadlock where neither the affected nor the non-affected
 analysts enact the merge — so the enactor is explicitly NOT required to be affected.
 
-If none of the conditions hold, this step is a no-op — proceed to Step 2.
+If none of the conditions hold, this step is a no-op — proceed to Step 1e.
+
+### Step 1e — Per-Molecule Diagnostics (advisory)
+
+`fitness` (`mean_rel_steps`) is averaged over the 250 train molecules and hides *where* the optimizer
+struggles. Per-molecule data is **available** if you want to ground a proposal in a specific
+molecule/chemistry signal — consulting it is optional, not required:
+
+- `{FOCUS_ROOT}/logs/run_log.md` — per experiment, the full per-molecule table
+  (`mol n_steps max_steps rel_steps rel_energy energy_delta_kcal_mol conv`), mirroring the
+  autoresearch `run.log`. (Raw per-agent shards: `{FOCUS_ROOT}/logs/molecule_results/*.jsonl`.)
+- `{FOCUS_ROOT}/task/molecule_smiles.tsv` — `mol_id → name, n_atoms, formula, SMILES` for the train
+  set, so a molecule id maps to real chemistry.
+
+Signals to look for, when you choose to: molecules with high `rel_steps` are where the step budget
+goes; `energy_delta_kcal_mol` near 1.0 means a molecule sits at the validity gate; `conv == 0` is a
+distinct (non-convergence) failure class.
+
+**Do not let this narrow the search.** You are NOT required to target the single worst molecule, and
+proposals that chase one stiff molecule tend to regress the others or tip the energy gate. Keep your
+proposals diverse and treat per-molecule data as one input among many. Proceed to Step 2.
 
 ### Step 2 — Prune Dead Ends
 
