@@ -384,9 +384,9 @@ if not diff_applied:
 **Eval-head connection parameters** (the remote sella checkout serving the worker pool):
 
 ```python
-EVAL_HOST       = "cpu-149"     # eval-head: scp the candidate here, ssh in to run the eval
+EVAL_HOST       = "cpu-33"      # eval-head a002dc-0002 (local ssh alias cpu-33): scp candidate here, ssh in to run the eval
 EVAL_REDIS_HOST = "localhost"   # Redis host as seen from the eval head
-EVAL_REDIS_PORT = 6392          # Redis port as seen from the eval head
+EVAL_REDIS_PORT = 6390          # Redis port as seen from the eval head (a002dc-0002 local redis, no tunnel)
 SELLA_CHECKOUT  = "/home/tsypin/opt_problem_as_sella"   # checkout on the eval head; eval_candidate.py is at its root
 EVAL_PYTHON     = "/home/tsypin/miniconda3/envs/gigaopt/bin/python"
 ```
@@ -722,7 +722,7 @@ timestamp: {datetime.now(timezone.utc).isoformat()}
 
 1. Copy `{FOCUS_ROOT}/champion/algo.py`
 2. scp it to the eval head and run from the sella checkout:
-   `python eval_candidate.py --program <remote algo.py> --redis-host localhost --redis-port 6392`
+   `python eval_candidate.py --program <remote algo.py> --redis-host localhost --redis-port 6390`
 3. Expected: {metric_name} = {champion_metric} (deterministic — exact match every run)
 
 ## Provenance
