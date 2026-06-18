@@ -87,10 +87,21 @@ falsified_since_reform = any(
 trigger_conditions = (rotations_since_keep >= 3) or falsified_since_reform
 
 # Is there already an active [DISCUSSION-TRIGGER] ?
+def roster_closes_trigger(trigger_id):
+    roster_raw = read_main_workspace_file("teams/roster.md")
+    roster = parse_frontmatter(roster_raw)
+    return (
+        bool(roster.get("teams") or {})
+        and roster.get("phase") == "executing"
+        and roster.get("source_trigger") == trigger_id
+        and roster.get("discussion_closed") is True
+    )
+
 active_trigger_exists = any(
     "[DISCUSSION-TRIGGER]" in p.title
     and age_rotations(p) <= 3
     and count_comments_matching(p.id, "[DISCUSS-DONE]") < 5
+    and not roster_closes_trigger(p.id)
     for p in recent_posts
 )
 ```
@@ -203,6 +214,9 @@ consensus that emerged from discussion:
 # Read all [HYPOTHESIS-*] and ranked proposals in the recent workshop
 # to identify 3 hypotheses with distinct falsifiable predictions.
 # Write new teams/roster.md to main workspace.
+# HEARTBEAT Part 0 uses source_trigger + discussion_closed as the
+# authoritative signal that execute-mode agents may proceed without being
+# routed back into the same discussion trigger.
 new_roster = {
     "teams": {
         hyp1_short_name: {
@@ -215,6 +229,8 @@ new_roster = {
         # ... two more teams
     },
     "phase": "executing",
+    "source_trigger": active_trigger["id"],
+    "discussion_closed": True,
 }
 put_main_workspace_file("teams/roster.md", yaml_dump(new_roster))
 

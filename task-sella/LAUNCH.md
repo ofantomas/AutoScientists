@@ -65,6 +65,8 @@ Rules:
    count. Multiple cpu-eval agents may dispatch concurrently; each candidate gets a unique remote
    path so they don't collide.
 5. Do NOT block on perfect discussion before evaluation starts.
+6. Once the analyst-owned roster has `discussion_closed: true` for the cold-start trigger, do not wait
+   for additional raw `[DISCUSS-DONE]` comments before CPU dispatch.
 
 **`extra_discussion_instructions` (empty if discussion is skipped):** no additions beyond the base
 prompt.

@@ -200,6 +200,19 @@ roster_raw = requests.get(f"{API}/workspaces/{WS_ID}/files/teams/roster.md",
                           headers=HEADERS).json()
 roster = parse_fm(roster_raw)
 teams  = roster.get("teams", {})
+
+recent_posts = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=30",
+                            headers=HEADERS).json().get("data", [])
+latest_trigger = next(
+    (p for p in recent_posts if "[DISCUSSION-TRIGGER]" in p.get("title", "")),
+    None,
+)
+discussion_closed = (
+    bool(teams)
+    and roster.get("phase") == "executing"
+    and roster.get("discussion_closed") is True
+    and (latest_trigger is None or roster.get("source_trigger") == latest_trigger.get("id"))
+)
 ```
 
 If `teams` is still empty after the first discussion wave, do not ask the monitor to resolve it.
@@ -212,6 +225,30 @@ still empty.
 ```python
 assert len(teams) >= 2, "Teams not formed properly by analyst bootstrap"
 ```
+
+If `teams` is non-empty but `discussion_closed` is false, treat this as an incomplete analyst-owned
+state transition, not as work for CPU-eval agents. Launch or resume the alphabetically-last analyst in
+`MODE=discussion` with instructions to patch `teams/roster.md` using `ROLE-ANALYST.md` Step 0.25
+closure fields:
+
+```yaml
+phase: executing
+source_trigger: <latest DISCUSSION-TRIGGER id>
+discussion_closed: true
+```
+
+Then re-read `teams/roster.md` and require:
+
+```python
+assert roster.get("phase") == "executing"
+assert roster.get("discussion_closed") is True
+if latest_trigger is not None:
+    assert roster.get("source_trigger") == latest_trigger["id"]
+```
+
+Do not launch the monitor, analysts, or CPU-eval agents in `MODE=execute` until this closure guard
+passes. This prevents the same discussion trigger from bouncing execute-mode agents back into
+discussion after team formation.
 
 After a non-empty roster exists, optionally launch the monitor for its janitorial audit only.
 
@@ -246,6 +283,54 @@ while True:
     # 5a — Pre-cycle check (may signal early exit)
     if pre_cycle_check():    # ← PROFILE HOOK
         break
+
+    # 5a2 — Discussion-closure guard.
+    # If a recent discussion produced teams/roster.md but did not mark the
+    # source trigger closed, run the alphabetically-last analyst as a closure
+    # pass before launching execute-mode work. CPU agents must not be used to
+    # close bookkeeping gates once an executable roster exists.
+    roster_raw = requests.get(f"{API}/workspaces/{WS_ID}/files/teams/roster.md",
+                              headers=HEADERS).json()
+    roster = parse_fm(roster_raw)
+    teams = roster.get("teams", {}) or {}
+    recent_posts = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=30",
+                                headers=HEADERS).json().get("data", [])
+    latest_trigger = next(
+        (p for p in recent_posts if "[DISCUSSION-TRIGGER]" in p.get("title", "")),
+        None,
+    )
+    trigger_reformed_posted = (
+        latest_trigger is not None
+        and any(
+            "[TEAM-REFORMED]" in p.get("title", "")
+            and latest_trigger["id"] in (p.get("title", "") + "\n" + p.get("content", ""))
+            for p in recent_posts
+        )
+    )
+    if teams and latest_trigger and trigger_reformed_posted and (
+        roster.get("phase") != "executing"
+        or roster.get("discussion_closed") is not True
+        or roster.get("source_trigger") != latest_trigger["id"]
+    ):
+        closure_agent = f"{PREFIX}_analyst3"
+        closure_prompt = (
+            f"You are {closure_agent}.\n"
+            f"AGENT_NAME={closure_agent}\n"
+            f"FOCUS_ROOT={FOCUS_ROOT}\n"
+            f"MODE=discussion\n"
+            f"Read {FOCUS_ROOT}/agents/{closure_agent}/HEARTBEAT.md and follow it.\n"
+            f"Start at Part 0 (Mode Selector).\n"
+            f"teams/roster.md already has executable teams but is missing closure fields for "
+            f"[DISCUSSION-TRIGGER] {latest_trigger['id']}. Complete ROLE-ANALYST.md Step 0.25 "
+            f"as a closure pass: preserve the existing teams/queues, set phase=executing, "
+            f"source_trigger={latest_trigger['id']}, and discussion_closed=true. "
+            f"Do not run evaluations.\n"
+            f"When done: <promise>{closure_agent} closure complete</promise>"
+        )
+        # Tool call: multi_agent_v1.spawn_agent(agent_type="default",
+        #     fork_context=False, reasoning_effort="xhigh", message=closure_prompt)
+        # Wait with multi_agent_v1.wait_agent, append logs/sessions.jsonl, close the agent,
+        # re-read teams/roster.md, and only continue if the closure assertions pass.
 
     # 5b — Launch analysts in parallel (Step 5b below)
     # 5c — Launch CPU-eval agents (Step 5c below)

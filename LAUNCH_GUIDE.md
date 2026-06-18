@@ -176,6 +176,12 @@ scp autoscientists/task-sella/eval_candidate.py "$EVAL_HOST:$EVAL_CHECKOUT/eval_
 > table (which feeds `logs/run_log.md` + the SMILES analysis) or aggregate-only. Deploy the copy that
 > matches the orchestrator branch.
 
+> **Remote-worker code matters too:** the eval head and every extra worker host run Python from their
+> local `$EVAL_CHECKOUT` / `<opt_problem-checkout>`. Before relaunching workers for a new AS branch,
+> update those checkouts to the intended validation code and restart the babysitters. Updating only the
+> coordinator repo can leave workers or the eval head executing stale validation modules, which is a
+> common cause of missing per-molecule output or inconsistent scoring.
+
 **B2. Verify the molecule baselines are fresh.** A git clone/bundle can miss or staledate the
 *untracked* baselines. Confirm `molecules/train_XTB.json` and `test_XTB.json` are the correct
 (fresh) baselines — a stale `train_XTB.json` makes a known-valid candidate score `is_valid=0` with a
@@ -228,6 +234,11 @@ babysitter opens the **reverse tunnel for you** when the Redis host is remote (`
 
 On each host in `$WORKER_HOSTS` (env active, `opt_problem` checked out), pick a free local port for
 the tunnel (e.g. `6380`) and:
+
+> **Before starting the tmux session, update this host's checkout.** Remote workers import
+> `distributed_validate`, molecular-system helpers, and other validation modules from their local
+> `<opt_problem-checkout>`. If that checkout is stale, the pool may keep old behavior even when the
+> eval head and coordinator were updated.
 
 ```bash
 LOCAL_PORT=6380   # any free port on this worker host

@@ -833,6 +833,8 @@ updated_at: "{NOW}"
 teams: {{}}
 updated_at: "{NOW}"
 phase: planning
+source_trigger: null
+discussion_closed: false
 ---
 
 # Team Roster
@@ -900,7 +902,9 @@ the alphabetically-last analyst who participates writes
 Per ROLE-ANALYST Step 0.25: when 5+ `[DISCUSS-DONE]` votes land, the
 alphabetically-last analyst who has run in this rotation writes
 `teams/roster.md` with 3 hypothesis-based teams (each with ≥1 cold
-axis) and posts `[TEAM-REFORMED]`. This closes bootstrap.
+axis), records `discussion_closed: true` plus this trigger id in roster
+frontmatter, and posts `[TEAM-REFORMED]`. The roster closure marker,
+not raw comment count alone, closes bootstrap.
 
 No monitor intervention is required.
 

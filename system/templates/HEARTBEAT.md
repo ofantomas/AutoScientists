@@ -43,30 +43,7 @@ intervention. Before executing a normal cycle, search the workshop for
 an unresolved `[DISCUSSION-TRIGGER]` post:
 
 ```python
-recent = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=30",
-                      headers=HEADERS).json().get("data", [])
-trigger_posts = [p for p in recent if "[DISCUSSION-TRIGGER]" in p.get("title", "")]
-
-# A trigger is "active" if:
-#   - it was posted within the last 3 rotations, AND
-#   - fewer than 5 [DISCUSS-DONE] posts exist on it
-if trigger_posts:
-    active_trigger = trigger_posts[0]  # most recent
-    done_count = count_comments_matching(active_trigger["id"], "[DISCUSS-DONE]")
-    if done_count < 5:
-        # Switch THIS agent into discussion mode
-        print(f"[DISCUSSION-TRIGGER active] switching to Part 2")
-        MODE = "discussion"
-        # fall through to Part 2
-```
-
-If an active trigger exists → go to **Part 2 (Discussion Branch)**.
-Otherwise → continue to Check B.
-
-### Check B: Do teams exist in the roster?
-
-```python
-import json, requests, yaml
+import json, os, re, requests, yaml
 from pathlib import Path
 
 AGENT_DIR = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}")
@@ -77,11 +54,84 @@ API = os.environ.get("CLAWINSTITUTE_API", "http://localhost:3000/api/v1")
 MAIN_WS_ID = open(f"{FOCUS_ROOT}/WORKSPACE_ID").read().strip()
 WORKSHOP = open(f"{FOCUS_ROOT}/WORKSHOP_NAME").read().strip()
 
+_agent_md = (AGENT_DIR / "AGENT.md").read_text() if (AGENT_DIR / "AGENT.md").exists() else ""
+_m = re.search(r"^role:\s*(\S+)", _agent_md, re.MULTILINE)
+MY_ROLE = _m.group(1).strip() if _m else "unknown"
+
 def parse_frontmatter(resp):
     content = resp.get("content", "")
     parts = content.split("---")
     return yaml.safe_load(parts[1]) if len(parts) >= 3 else {}
 
+recent = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=30",
+                      headers=HEADERS).json().get("data", [])
+trigger_posts = [p for p in recent if "[DISCUSSION-TRIGGER]" in p.get("title", "")]
+
+# A trigger routes an agent to discussion if:
+#   - no roster exists yet and fewer than 5 [DISCUSS-DONE] posts exist, OR
+#   - a [TEAM-REFORMED] post already exists for the trigger but the roster
+#     closure marker is missing, and this is not a CPU-eval agent.
+#
+# Once the alphabetically-last analyst writes teams/roster.md with
+# discussion_closed: true and source_trigger: <trigger_id>, that roster is the
+# authoritative closure signal. Do not send execute-mode agents back into
+# discussion just because raw comments are missing or slow to index.
+if trigger_posts:
+    active_trigger = trigger_posts[0]  # most recent
+    done_count = count_comments_matching(active_trigger["id"], "[DISCUSS-DONE]")
+    roster_raw_for_trigger = requests.get(
+        f"{API}/workspaces/{MAIN_WS_ID}/files/teams/roster.md",
+        headers=HEADERS,
+    ).json()
+    roster_fm_for_trigger = parse_frontmatter(roster_raw_for_trigger)
+    trigger_roster_teams = roster_fm_for_trigger.get("teams", {}) or {}
+    trigger_closed_by_roster = (
+        bool(trigger_roster_teams)
+        and roster_fm_for_trigger.get("phase") == "executing"
+        and roster_fm_for_trigger.get("source_trigger") == active_trigger["id"]
+        and roster_fm_for_trigger.get("discussion_closed") is True
+    )
+    trigger_reformed_posted = any(
+        "[TEAM-REFORMED]" in p.get("title", "")
+        and active_trigger["id"] in (p.get("title", "") + "\n" + p.get("content", ""))
+        for p in recent
+    )
+
+    if trigger_closed_by_roster:
+        print(f"[DISCUSSION-TRIGGER closed] roster closes {active_trigger['id']}; continuing")
+    elif not trigger_roster_teams:
+        # Switch THIS agent into discussion mode
+        print(f"[DISCUSSION-TRIGGER active] switching to Part 2")
+        MODE = "discussion"
+        # fall through to Part 2
+    elif trigger_reformed_posted and MY_ROLE != "cpu":
+        # Team reform already happened but roster lacks a closure marker.
+        # Analysts/monitor may repair the marker; CPU-eval agents should not
+        # spend eval slots on bookkeeping closure once an executable roster exists.
+        print(f"[DISCUSSION-TRIGGER needs closure marker] switching non-CPU agent to Part 2")
+        MODE = "discussion"
+    elif trigger_reformed_posted:
+        print(f"[DISCUSSION-TRIGGER marker missing] CPU agent continues to execute")
+    elif done_count < 5:
+        # Fresh regroup trigger: all agents contribute to discussion until quorum.
+        print(f"[DISCUSSION-TRIGGER active] switching to Part 2")
+        MODE = "discussion"
+    elif MY_ROLE != "cpu":
+        # Quorum reached but no reform has been posted. Let analysts/monitor
+        # close/reform; avoid using CPU-eval agents for discussion bookkeeping.
+        print(f"[DISCUSSION-TRIGGER quorum reached] switching non-CPU agent to Part 2")
+        MODE = "discussion"
+    else:
+        print(f"[DISCUSSION-TRIGGER quorum reached] CPU agent continues to execute")
+```
+
+If Check A2 set `MODE = "discussion"` → go to **Part 2 (Discussion Branch)**.
+If the latest trigger is already closed by `teams/roster.md`, or this CPU-eval agent is allowed to
+continue because only the closure marker is missing, continue to Check B.
+
+### Check B: Do teams exist in the roster?
+
+```python
 roster_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/teams/roster.md",
                           headers=HEADERS).json()
 roster = parse_frontmatter(roster_raw).get("teams", {}) or {}
@@ -172,6 +222,7 @@ You have a team, no pending result, and the launch prompt did not request discus
 | any | any | any | (CPU-eval only) unposted, eval still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
 | any | any | any | (CPU-eval only) unposted, eval finished | Part 5 | Post [RESULT], update champion, mark posted |
 | `discussion` | any | any | none | Part 2 | CPU-only thinking, read + respond + propose |
+| `execute` or unset | non-empty, closes latest trigger | set | none | Part 4 | Normal cycle; roster closure overrides stale raw trigger count |
 | `execute` or unset | empty | — | none | Part 2 | Cold-start bootstrap: contribute to dimension discussion so a roster can be committed |
 | `execute` or unset | non-empty | None | none | Part 3 | Exit cleanly (you are not on any team — coordination bug) |
 | `execute` or unset | non-empty | set | none | Part 4 | Normal cycle: orient, role work, record |
