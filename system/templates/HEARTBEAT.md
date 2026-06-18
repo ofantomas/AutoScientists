@@ -29,7 +29,7 @@ Before ANY other work, you must determine which branch to execute. Follow these 
 
 The orchestrator may include `MODE=discussion` or `MODE=execute` in your launch prompt. Read your launch prompt carefully now.
 
-- **`MODE=discussion`** → go to **Part 2 (Discussion Branch)**. CPU-only. No experiments. Even if you are a GPU agent, you do thinking work this cycle.
+- **`MODE=discussion`** → go to **Part 2 (Discussion Branch)**. CPU-only. No experiments. Even if you are a CPU-eval agent, you do thinking work this cycle.
 - **`MODE=execute`** (or no MODE set) → continue to Check A2.
 
 ### Check A2: Workshop-triggered discussion — agents self-regroup
@@ -95,24 +95,24 @@ for name, t in roster.items():
 - **`roster` has teams but `MY_TEAM is None` (you are not on any team)** → go to **Part 3 (No-Team Branch)**. Exit cleanly. (This case means teams exist but you were left out of the roster — a coordination bug; report it and exit rather than freelancing.)
 - **`MY_TEAM` is set** → continue to Check C.
 
-### Check C: Pending result from a prior session? (GPU agents only)
+### Check C: Pending result from a prior session? (CPU-eval agents only)
 
-If a prior invocation backgrounded training and exited before posting `[RESULT]`,
-finish that first. The sentinel is `agents/{AGENT_NAME}/workspace/result_latest.json`.
-Only GPU agents create this sentinel, so skip this check for other roles.
+If a prior invocation backgrounded a candidate evaluation and exited before posting
+`[RESULT]`, finish that first. The sentinel is `agents/{AGENT_NAME}/workspace/result_latest.json`.
+Only CPU-eval agents create this sentinel, so skip this check for other roles.
 
 ```python
 import json, os, re
 from pathlib import Path
 
 # Derive MY_ROLE from AGENT.md frontmatter — needed here (before Part 1 boots
-# AGENT.md more fully) because Check C is GPU-only.
+# AGENT.md more fully) because Check C is CPU-eval-only.
 _agent_md = (AGENT_DIR / "AGENT.md").read_text() if (AGENT_DIR / "AGENT.md").exists() else ""
 _m = re.search(r"^role:\s*(\S+)", _agent_md, re.MULTILINE)
 MY_ROLE = _m.group(1).strip() if _m else "unknown"
 
-if MY_ROLE != "gpu":
-    pending_result = None  # non-GPU roles never create result_latest.json — skip to Check D
+if MY_ROLE != "cpu":
+    pending_result = None  # non-eval roles never create result_latest.json — skip to Check D
 else:
     pending_path = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/result_latest.json")
     pending_result = json.loads(pending_path.read_text()) if pending_path.exists() else None
@@ -123,45 +123,39 @@ def _alive(pid):
 
 if pending_result and not pending_result.get("posted_to_workshop"):
     status = pending_result.get("status", "complete")
-    # Promote running→complete if PID died AND any training artifact landed.
-    # Covers two failure modes:
-    #   (a) Kaggle-style submission: submission_path file exists.
-    #   (b) Autoresearch / training-only: stdout_path file exists and is
-    #       non-empty (training subprocess wrote logs before the agent died).
-    # Both mean training itself ran; only the post-train API trail was lost
-    # (rate limit, OOM, ungraceful kill). Treat as complete so Part 5 can
-    # salvage val_score from the on-disk log.
+    # Promote running→complete if the PID died AND the eval emitted output.
+    # The remote eval (eval_candidate.py) prints ONE JSON line with the score;
+    # stdout_path captures it. A non-empty stdout_path means the evaluation
+    # itself ran and the JSON score is on disk; only the post-eval API trail
+    # was lost (rate limit, OOM, ungraceful kill). Treat as complete so Part 5
+    # can salvage the score (fitness / is_valid) from that on-disk JSON.
     pid_dead = not _alive(pending_result.get("pid"))
-    sub_path = pending_result.get("submission_path")
     out_path = pending_result.get("stdout_path")
-    train_artifact_exists = (
-        (sub_path and Path(sub_path).exists()) or
-        (out_path and Path(out_path).exists() and Path(out_path).stat().st_size > 0)
+    eval_artifact_exists = (
+        out_path and Path(out_path).exists() and Path(out_path).stat().st_size > 0
     )
-    if status == "running" and pid_dead and train_artifact_exists:
+    if status == "running" and pid_dead and eval_artifact_exists:
         status = "complete"; pending_result["status"] = status
-        pending_result["salvaged_from"] = "Check C promote: pid dead, artifact present"
+        pending_result["salvaged_from"] = "Check C promote: pid dead, eval output present"
         pending_path.write_text(json.dumps(pending_result, indent=2))
 
     if status == "running" and _alive(pending_result.get("pid")):
-        branch_taken = "resume-waiting"   # GPU busy — log and exit via Part 6e, no new work
+        branch_taken = "resume-waiting"   # eval still running — log and exit via Part 6e, no new work
     elif status == "complete":
         branch_taken = "resume-and-post"  # go to Part 5 after minimal Part 1 boot
     # else status="posted" → fall through to Check D
 ```
 
-Routing: missing / `posted` → Check D. `running`+alive → resume-waiting (straight to Part 6e). `complete` (or dead PID + any train artifact) → **Part 5**.
+Routing: missing / `posted` → Check D. `running`+alive → resume-waiting (straight to Part 6e). `complete` (or dead PID + eval output on disk) → **Part 5**.
 
 **Salvage path for orchestrator-driven recovery.** When an agent dies after
-training but before posting (rate limit, OOM kill, ungraceful exit), simply
-relaunching it triggers the Check C promotion above and Part 5 reads
-`val_score` from the sentinel (or re-parses it from `stdout_path` if missing).
-If for some reason the sentinel itself is corrupt and the agent can't
-self-recover, the orchestrator may post the [RESULT] directly using the
-agent's token (read `stdout_path` for the metric, write a [RESULT] post
-tagged `salvaged:true`, release the queue claim, mark sentinel posted). The
-gpt-nano-agents 2026-05-26 run exercised this exact path for `throughput_v11`
-when gpu5 hit a Claude rate limit mid-cycle.
+the eval finishes but before posting (rate limit, OOM kill, ungraceful exit),
+simply relaunching it triggers the Check C promotion above and Part 5 reads
+`fitness` from the sentinel (or re-parses the eval JSON from `stdout_path` if
+missing). If for some reason the sentinel itself is corrupt and the agent
+can't self-recover, the orchestrator may post the [RESULT] directly using the
+agent's token (read `stdout_path` for the eval JSON, write a [RESULT] post
+tagged `salvaged:true`, release the queue claim, mark sentinel posted).
 
 ### Check D: Normal cycle
 
@@ -171,8 +165,8 @@ You have a team, no pending result, and the launch prompt did not request discus
 
 | Launch MODE | Roster | MY_TEAM | Pending result? | Branch | What you do |
 |---|---|---|---|---|---|
-| any | any | any | (GPU only) unposted, training still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
-| any | any | any | (GPU only) unposted, training finished | Part 5 | Post [RESULT], update champion, mark posted |
+| any | any | any | (CPU-eval only) unposted, eval still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
+| any | any | any | (CPU-eval only) unposted, eval finished | Part 5 | Post [RESULT], update champion, mark posted |
 | `discussion` | any | any | none | Part 2 | CPU-only thinking, read + respond + propose |
 | `execute` or unset | empty | — | none | Part 2 | Cold-start bootstrap: contribute to dimension discussion so a roster can be committed |
 | `execute` or unset | non-empty | None | none | Part 3 | Exit cleanly (you are not on any team — coordination bug) |
@@ -222,144 +216,57 @@ MAIN_WS_ID = open(f"{FOCUS_ROOT}/WORKSPACE_ID").read().strip()
 WORKSHOP = open(f"{FOCUS_ROOT}/WORKSHOP_NAME").read().strip()
 ```
 
-### Biomlbench Deadline Awareness — READ THIS IF BIOMLBENCH=true
+### Result sentinel — write `result_latest.json` after every evaluation
 
-If your launch prompt contains `BIOMLBENCH=true`, this is a **fixed-deadline benchmark task**.
-Read these values from your launch prompt now:
+The champion artifact is `algo.py` (the candidate optimizer). There is no
+`submission.csv`, no model training, and no fixed wall-clock deadline — a
+candidate is scored by the remote eval (`eval_candidate.py`), which prints ONE
+JSON line whose keys include `fitness` (= mean_rel_steps, lower is better) and
+`is_valid` (0/1 energy-validity gate). The agent parses that JSON directly.
+
+**ISOLATION RULE (read this first):** You MUST NOT write to `champion/algo.py`
+directly. Keep your edited candidate in your own agent-local workspace
+(`agents/{AGENT_NAME}/workspace/repo/algo.py`, and a stamped `algo_<expid>.py`).
+The orchestrator is the ONLY entity that copies a winning candidate to
+`champion/algo.py` when `fitness` strictly improves (and the run is valid).
+Violating this causes agents to overwrite each other's work.
+
+After every evaluation, write a local result summary so the orchestrator can
+find your best score AND so Part 0 Check C can tell whether a prior session's
+result still needs narrating. Always point to the stamped agent-local path
+(never `champion/`):
 
 ```python
-import os
+import json, shutil
+from pathlib import Path
 
-# The orchestrator injects TIME_REMAINING_MINUTES and DEADLINE_BUFFER_MINUTES
-# as plain KEY=VALUE lines in your launch prompt (visible in your context above).
-# Read them directly from the literal text of your launch prompt now.
-# They look like:
-#   TIME_REMAINING_MINUTES=420
-#   DEADLINE_BUFFER_MINUTES=30
-#   CUDA_VISIBLE_DEVICES=""
-#
-# Extract these values by scanning the lines at the top of your prompt.
-# If you cannot find them (e.g. this is an old-style prompt), use safe defaults.
+agent_workspace = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
 
-# TIME_REMAINING_MINUTES: minutes left before the wall-clock deadline
-# Default 480 (8 h) if somehow missing — agents must not assume infinite time.
-TIME_REMAINING_MINUTES = float("<value of TIME_REMAINING_MINUTES from your prompt>")
+# Save a stamped copy of the candidate (isolation rule — never write to champion/ directly)
+shutil.copy(agent_workspace / "algo.py", agent_workspace / f"algo_{exp_id}.py")
 
-# DEADLINE_BUFFER_MINUTES: stop new experiments this many minutes before deadline
-DEADLINE_BUFFER_MINUTES = float("<value of DEADLINE_BUFFER_MINUTES from your prompt, default 30>")
-
-# IS_CPU_ONLY: True when CUDA_VISIBLE_DEVICES="" was set in the prompt
-IS_CPU_ONLY = (os.environ.get("CUDA_VISIBLE_DEVICES", "unset") == "")
-
-print(f"[BIOMLBENCH] Time remaining: {TIME_REMAINING_MINUTES:.0f} min  "
-      f"buffer: {DEADLINE_BUFFER_MINUTES:.0f} min  cpu_only: {IS_CPU_ONLY}")
+result_summary = {
+    # Score + path — orchestrator promotes the best agent's candidate on a valid improvement.
+    "fitness": your_fitness_value,   # from the eval JSON (= mean_rel_steps, lower is better)
+    "is_valid": your_is_valid_flag,  # from the eval JSON (0/1 energy-validity gate)
+    "direction": "minimize",
+    "exp_id": exp_id, "agent": AGENT_NAME,
+    "algo_path": str(agent_workspace / f"algo_{exp_id}.py"),
+    # Resume fields — read by HEARTBEAT Part 0 Check C. REQUIRED.
+    "status": "complete",         # "running" | "complete" | "posted"
+    "posted_to_workshop": False,  # flip True after [RESULT] post succeeds
+    "result_post_id": None,
+    "pid": None, "monitor_id": None,
+    "stdout_path": None, "stderr_path": None,  # stdout_path captures the eval JSON line
+    "item": item if "item" in dir() else None,
+    "queue_claimed": True,
+    "timestamp": datetime.now(timezone.utc).isoformat(),
+}
+(Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace") / "result_latest.json").write_text(
+    json.dumps(result_summary, indent=2, default=str)
+)
+# NEVER copy to champion/ yourself — orchestrator handles promotion.
 ```
-
-**Hard rules for biomlbench agents — these override your normal cycle logic:**
-
-**ISOLATION RULE (read this first):** You MUST NOT write to `task/submission.csv` or
-`champion/train.py` directly. Save all outputs to your own agent-local workspace:
-`agents/{AGENT_NAME}/workspace/repo/submission_<expid>.csv` and `train_<expid>.py`.
-Then write `agents/{AGENT_NAME}/workspace/result_latest.json` with your score and paths.
-The orchestrator is the ONLY entity that copies to `task/submission.csv` and `champion/train.py`
-when the score strictly improves. Violating this causes agents to overwrite each other's work.
-
-1. **If `TIME_REMAINING_MINUTES < DEADLINE_BUFFER_MINUTES + 20`:**
-   - Do NOT claim or start any new experiment that takes more than 10 minutes.
-   - If you have a working `train.py` (from your workspace or `champion/`), run it
-     immediately, save your submission to `agents/{AGENT_NAME}/workspace/repo/submission_<expid>.csv`,
-     write `result_latest.json`, and exit. The orchestrator will promote it.
-   - If you have no working `train.py`, write the simplest possible model from `task/TASK.md`,
-     run it, save to agent-local paths, write `result_latest.json`, and exit. No second experiment.
-
-2. **If `TIME_REMAINING_MINUTES < DEADLINE_BUFFER_MINUTES`:**
-   - STOP. Do not run any training.
-   - If `{FOCUS_ROOT}/task/submission.csv` exists (orchestrator already promoted one), exit immediately.
-   - If it does not exist, check your own workspace for `submission_*.csv` files; if found,
-     write `result_latest.json` pointing to the best one so the orchestrator can promote it.
-     Do NOT copy it to `task/submission.csv` yourself.
-   - If no submission exists anywhere in your workspace, write one using random/zero scores for
-     all test rows, save to agent-local path, write `result_latest.json`, and exit.
-
-3. **`submission.csv` takes priority over val metric.** A run that produces a submission but
-   has a low val score is worth more than a run that produces no submission.
-
-3b. **Prioritize fundamentally new approaches over incremental HP tuning.** For biomlbench
-    tasks, experiments that change the model family, featurization strategy, or training
-    objective are strongly preferred over fine-grained tuning of a model that has already
-    been reasonably optimized. Light HP tuning of a new approach is fine; running multiple
-    consecutive experiments that only adjust regularization coefficients, search trial
-    counts, or seed counts on the same architecture is not recommended — these tend to
-    produce deltas inside the CV noise band without improving held-out generalization.
-    See ROLE-GPU Step 2a for full guidance.
-
-4. **Every experiment must save a stamped `submission_<expid>.csv` to your agent workspace
-   and update `result_latest.json` before exiting** — not just the last one. Never write to
-   `task/submission.csv` directly. The orchestrator propagates the best one; your job is to
-   ensure `result_latest.json` always points to a valid submission file.
-
-5. **No champion/train.py on cycle 1:** For biomlbench tasks, `champion/train.py` does not
-   exist at the start. When you reach Step 2 (Read Champion Config) of ROLE-GPU and
-   `champion/train.py` is missing, skip the copy step and instead write `train.py` from scratch
-   in your workspace (`{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo/train.py`) using the
-   instructions in `task/TASK.md`. This IS your baseline experiment.
-
-6. **GPU step for CPU-only tasks.** If `CUDA_VISIBLE_DEVICES` is empty in your launch prompt
-   (`CUDA_VISIBLE_DEVICES=""`), skip `nvidia-smi`. Proceed directly to Step 1.5 (baseline
-   coordination). All training runs on CPU. However, `GPU_AVAILABLE=False` does NOT restrict
-   your method choice — see ROLE-GPU Step 2a for the full CPU-friendly paradigm menu; do not
-   default to RDKit+XGBoost just because it is familiar.
-
-7. **Approach diversity (REQUIRED before any experiment).** Read `GPU_AVAILABLE` from your
-   launch prompt. Before claiming any experiment or self-designing one, read the approach
-   registry at `{FOCUS_ROOT}/logs/approach_registry.json`. Do NOT run an approach already
-   registered by another agent this cycle. Follow the registration protocol in ROLE-GPU Step 2a-i.
-
-8. **Compute-mode declaration (REQUIRED if GPU_AVAILABLE=True).** After registering your
-   approach and before any training, write your compute mode to a one-line file:
-   `echo 'gpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.gpu_claim`  (GPU experiment)
-   `echo 'cpu' > {FOCUS_ROOT}/logs/{AGENT_NAME}.gpu_claim`  (CPU-only experiment)
-   The orchestrator reads this to decide whether to serialize or parallelize the next agent.
-   Write it as early as possible — within ~60 s of starting. See ROLE-GPU Step 2a-ii for full
-   guidance on which experiments are GPU vs CPU and how to balance the mix across the team.
-
-9. **After every training run, write a local result summary** so the orchestrator can find
-   your best score AND so Part 0 Check C can tell whether a prior session's result still
-   needs narrating. Always point to the stamped agent-local paths (never `task/` or
-   `champion/`):
-   ```python
-   import json
-   from pathlib import Path
-
-   agent_workspace = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
-
-   # Save stamped copies (isolation rule — never write to task/ or champion/ directly)
-   import shutil
-   shutil.copy(agent_workspace / "submission.csv", agent_workspace / f"submission_{exp_id}.csv")
-   shutil.copy(agent_workspace / "train.py",       agent_workspace / f"train_{exp_id}.py")
-
-   result_summary = {
-       # Score + paths — orchestrator promotes best agent's files.
-       "val_score": your_val_metric_value,
-       "direction": "maximize",  # or "minimize"
-       "exp_id": exp_id, "agent": AGENT_NAME,
-       "submission_path": str(agent_workspace / f"submission_{exp_id}.csv"),
-       "train_path":      str(agent_workspace / f"train_{exp_id}.py"),
-       # Resume fields — read by HEARTBEAT Part 0 Check C. REQUIRED.
-       "status": "complete",         # "running" | "complete" | "posted"
-       "posted_to_workshop": False,  # flip True after [RESULT] post succeeds
-       "result_post_id": None,
-       "pid": None, "monitor_id": None,
-       "stdout_path": None, "stderr_path": None,
-       "item": item if "item" in dir() else None,
-       "queue_claimed": True,
-       "timestamp": datetime.now(timezone.utc).isoformat(),
-   }
-   (Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace") / "result_latest.json").write_text(
-       json.dumps(result_summary, indent=2, default=str)
-   )
-   # NEVER copy to task/ or champion/ yourself — orchestrator handles promotion.
-   ```
 
 ### YAML Frontmatter Parsing
 
@@ -395,7 +302,7 @@ to synthesis — just read what's there and do whatever is most valuable.
 task_spec = open(f"{FOCUS_ROOT}/task/TASK.md").read()
 
 # Read champion code (if baseline exists)
-champion_path = Path(f"{FOCUS_ROOT}/champion/train.py")
+champion_path = Path(f"{FOCUS_ROOT}/champion/algo.py")
 champion_code = champion_path.read_text() if champion_path.exists() else None
 
 # Read ALL recent workshop posts — not just the first few
@@ -410,9 +317,10 @@ for post in recent:
                             headers=HEADERS).json().get("data", [])
 ```
 
-**Read the champion code thoroughly.** Not just the config section —
-read the full training loop, the optimizer setup, the model forward
-pass, every numeric constant. The code IS the search space.
+**Read the champion code thoroughly.** Not just the top-level config —
+read the full `minimize_func` body: the step/line-search logic, the
+Hessian / preconditioner handling, the convergence test, every numeric
+constant. The code IS the search space.
 
 ### 2b. Decide what to contribute based on what already exists
 
@@ -436,22 +344,23 @@ Choose whichever of these is most valuable given what's already posted:
 
 3. **Rank proposals.** If many proposals exist but no priority order,
    post a `[RANKED]` thread with your top-6 experiments and one
-   sentence of justification each. Prioritize by information-per-GPU-
-   hour: which experiment teaches us the most for 5 minutes of GPU?
-   When ranking, estimate each proposal's effect on total training
-   steps (or equivalent throughput) in the fixed budget. Proposals
-   that increase effective steps are systematically higher-value than
-   proposals that change per-step quality, because more steps compounds
-   over the full budget while per-step quality is a one-time constant.
-   Proposals that REDUCE throughput (larger model, more complex
-   operations) need a very strong per-step quality argument to justify
-   the step loss.
+   sentence of justification each. Prioritize by information-per-eval:
+   which experiment teaches us the most per remote evaluation? When
+   ranking, estimate each proposal's effect on `fitness`
+   (= mean_rel_steps, lower is better) and whether it risks tripping
+   the `is_valid` energy gate. Proposals that cut force calls across
+   many molecules are systematically higher-value than ones that help
+   a single molecule, because the metric averages over the whole set.
+   Proposals that risk invalidating a molecule (final energy drifting
+   above the ceiling) need a very strong step-savings argument, since
+   any invalid molecule discards the entire run.
 
-4. **Trace the training loop.** If nobody has analyzed training
-   dynamics, trace the champion code's training loop: how many steps
-   in the time budget? What fraction at peak LR? What fraction is
-   schedule phases? What controls step count? Post a `[DYNAMICS]`
-   thread. This analysis often reveals the highest-leverage moves.
+4. **Trace the relaxation loop.** If nobody has analyzed the optimizer
+   dynamics, trace the champion's `minimize_func`: how many force calls
+   per molecule before convergence? Where are calls spent — line
+   search, Hessian rebuilds, restarts? What controls the step count?
+   Post a `[DYNAMICS]` thread. This analysis often reveals the
+   highest-leverage moves.
 
 5. **Enumerate ALL numbers — including derived/computed values.** If
    nobody has done a complete constant audit, read the target code
@@ -527,8 +436,8 @@ import sys; sys.exit(0)
 ```
 
 **Forbidden in this branch:**
-- Running ANY training code
-- Editing `champion/train.py` or any file under `champion/`
+- Running ANY candidate evaluation
+- Editing `champion/algo.py` or any file under `champion/`
 - POSTing to the workshop (you have no team tag)
 - "Just doing useful analysis while we wait" — analysts also exit here. Useful work requires a team context.
 
@@ -572,10 +481,10 @@ Follow your role-specific protocol below (Part 4-Role) and team coordination pro
 ### 4e. Mandatory API trail
 
 Every experiment, proposal, or knowledge artifact you produce in this branch MUST be reflected in the AnonAPI API:
-- **GPU agents**: claim from queue → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. If KEEP, also PUT `champion.md`.
+- **CPU-eval agents**: claim from queue → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. If KEEP, also PUT `champion.md`.
 - **Analysts**: POST `[PROPOSAL]` to workshop → PATCH team `queue.md` to add the experiment.
 
-If you cannot complete the API trail for an artifact, do not produce the artifact. Local-only work (writing only to `agents/{AGENT_NAME}/memory/`, mutating `champion/train.py` without the trail) is FREELANCING and is forbidden.
+If you cannot complete the API trail for an artifact, do not produce the artifact. Local-only work (writing only to `agents/{AGENT_NAME}/memory/`, mutating `champion/algo.py` without the trail) is FREELANCING and is forbidden.
 
 ---
 
@@ -593,22 +502,23 @@ If you cannot complete the API trail for an artifact, do not produce the artifac
 
 ---
 
-## Part 5: Branch — Resume-and-Post (GPU agents only)
+## Part 5: Branch — Resume-and-Post (CPU-eval agents only)
 
-Finish a prior session's unposted result. Do NOT claim new work, do NOT touch `train.py`. **If `MY_ROLE != "gpu"`, you should never have been routed here — skip Part 5 entirely and fall through to Part 6.** Only GPU agents write `result_latest.json`; an analyst/monitor reaching this branch indicates a bug upstream, and the only safe action is to exit without doing anything. Inlines the champion-update path from ROLE-GPU.md Step 7.0 (noise gate) + Step 7b (champion.md PUT); both required on KEEP.
+Finish a prior session's unposted result. Do NOT claim new work, do NOT touch `algo.py`. **If `MY_ROLE != "cpu"`, you should never have been routed here — skip Part 5 entirely and fall through to Part 6.** Only CPU-eval agents write `result_latest.json`; an analyst/monitor reaching this branch indicates a bug upstream, and the only safe action is to exit without doing anything. Inlines the champion-update path from ROLE-CPU.md Step 7.0 (noise gate) + Step 7b (champion.md PUT); both required on KEEP.
 
 ```python
 import json, yaml
 from datetime import datetime, timezone
 
-# 5a. Rehydrate from sentinel (loaded in Part 0 Check C). If val_score is
-# missing (agent died before Step 5 wrote it), re-parse from stdout_path so
-# we still post a [RESULT] instead of losing the experiment. Worst case the
-# parse fails → val_score stays None → Part 5 marks FAILED, the queue claim
-# is released, and the proposal stays available for a fresh agent.
+# 5a. Rehydrate from sentinel (loaded in Part 0 Check C). If fitness is
+# missing (agent died before Step 5 wrote it), re-parse the eval JSON from
+# stdout_path so we still post a [RESULT] instead of losing the experiment.
+# Worst case the parse fails → fitness stays None → Part 5 marks FAILED, the
+# queue claim is released, and the proposal stays available for a fresh agent.
 exp_id      = pending_result["exp_id"]
-our_metric  = pending_result.get("val_score")
-direction   = pending_result.get("direction", "maximize")
+our_metric  = pending_result.get("fitness")
+is_valid    = pending_result.get("is_valid")
+direction   = pending_result.get("direction", "minimize")
 item        = pending_result.get("item") or {}
 description = pending_result.get("description") or item.get("diff") or f"Resumed ({exp_id})"
 
@@ -616,15 +526,25 @@ if our_metric is None and (out := pending_result.get("stdout_path")):
     import re
     try:
         log = Path(out).read_text(errors="ignore")
-        # Both "val_bpb: 0.984" and "val_score=0.842" forms are accepted.
-        m = re.search(r"(?:val_bpb|val_score|val_metric)[:=\s]+([0-9.eE+-]+)", log)
-        if m:
-            our_metric = float(m.group(1))
-            pending_result["val_score"] = our_metric
-            pending_result["salvaged_from"] = (pending_result.get("salvaged_from", "") +
-                                                "; val_score re-parsed from stdout")
+        # eval_candidate.py prints ONE JSON line; grab the last JSON object and
+        # read fitness / is_valid from it.
+        for line in reversed(log.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                if "fitness" in j:
+                    our_metric = float(j["fitness"])
+                    is_valid = j.get("is_valid", is_valid)
+                    pending_result["fitness"] = our_metric
+                    pending_result["is_valid"] = is_valid
+                    pending_result["salvaged_from"] = (pending_result.get("salvaged_from", "") +
+                                                        "; fitness re-parsed from eval JSON")
+                    break
     except Exception as e:
-        print(f"[salvage] stdout re-parse failed: {e}")
+        print(f"[salvage] eval-JSON re-parse failed: {e}")
 
 # 5b. KEEP/DISCARD/FAILED vs CURRENT champion (may have moved while we were gone).
 # If the prior session recorded `diff_applied: false` in the sentinel (Step 4's
@@ -635,17 +555,22 @@ if our_metric is None and (out := pending_result.get("stdout_path")):
 diff_applied = bool(pending_result.get("diff_applied", item.get("diff_applied", True)))
 champ_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md", headers=HEADERS).json()
 champ = parse_frontmatter(champ_raw)
-metric_name = champ.get("metric_name", "val_score")
-current_best = champ.get(metric_name, float("-inf") if direction == "maximize" else float("inf"))
+metric_name = champ.get("metric_name", "fitness")
+current_best = champ.get("metric_value", float("-inf") if direction == "maximize" else float("inf"))
 improved = (direction == "maximize" and our_metric > current_best) or \
            (direction == "minimize" and our_metric < current_best)
+# A candidate that fails the energy-validity gate (is_valid == 0) can never be a
+# champion, regardless of fitness — invalid runs are discarded by contract.
+valid_run = is_valid is None or bool(is_valid)
 if not diff_applied:
     outcome = "FAILED"
+elif not valid_run:
+    outcome = "DISCARD"
 else:
     outcome = "KEEP" if improved else "DISCARD"
 delta   = (our_metric - current_best) if direction == "maximize" else (current_best - our_metric)
 
-# 5c. Release claim AND move item pending→completed (same as ROLE-GPU.md Step 6).
+# 5c. Release claim AND move item pending→completed (same as ROLE-CPU.md Step 6).
 # Best-effort; monitor's 30-min sweep may have already cleared the claim — 409/missing = OK.
 try:
     q_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/queue.md", headers=HEADERS).json()
@@ -660,7 +585,7 @@ try:
             it["completed_at"] = datetime.now(timezone.utc).isoformat()
             it["completed_by"] = AGENT_NAME
             it["outcome"]      = outcome
-            it["val_score"]    = our_metric
+            it["fitness"]      = our_metric
             it["resumed"]      = True
             completed.append(it)
         else:
@@ -675,8 +600,8 @@ try:
 except Exception as e:
     print(f"[RESUME] claim release skipped: {e!r}")
 
-# 5d. If KEEP: run the multi-seed noise gate from ROLE-GPU.md Step 7.0, then PUT
-#     champion.md per ROLE-GPU.md Step 7a/7b (with If-Match on champ_raw version for
+# 5d. If KEEP: run the multi-seed noise gate from ROLE-CPU.md Step 7.0, then PUT
+#     champion.md per ROLE-CPU.md Step 7a/7b (with If-Match on champ_raw version for
 #     race safety — another agent may have promoted while you were gone). Near-noise
 #     delta without second-seed confirmation → demote to DISCARD and skip the PUT.
 
@@ -791,7 +716,7 @@ Before you do ANY work, confirm in your head:
 - [ ] I read `teams/roster.md` and determined `MY_TEAM`.
 - [ ] I checked `agents/{AGENT_NAME}/workspace/result_latest.json` for an unposted prior result (Part 0 Check C).
 - [ ] I picked exactly ONE branch from the Part 0 table.
-- [ ] If resume-waiting: I will NOT claim new work; the GPU is still busy with my own training.
+- [ ] If resume-waiting: I will NOT claim new work; the eval is still running from my own session.
 - [ ] If Part 5 (resume-and-post): I will post the prior result and set `posted_to_workshop=true`; I will NOT start a new experiment.
 - [ ] If Part 2 (discussion): I will NOT touch any training code.
 - [ ] If Part 3 (no-team): I will exit immediately after recording.

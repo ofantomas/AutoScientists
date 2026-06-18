@@ -526,5 +526,5 @@ embeddings, valid = f.transform(smiles_list)
 ## References
 
 - `system/reference/LOGGING.md` — how to log experiment results
-- `system/templates/ROLE-GPU.md` — how to claim an experiment and record KEEP/DISCARD
+- `system/templates/ROLE-CPU.md` — how to claim an experiment and record KEEP/DISCARD
 - HuggingFace Hub docs: huggingface.co/docs/huggingface_hub/guides/download

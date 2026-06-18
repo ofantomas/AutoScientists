@@ -295,15 +295,13 @@ python3 launch.py my-run --task task-biomlbench/drug_discovery/tdcommons-caco2-w
 
 `launch.py` will:
 - Copy `task-biomlbench/<category>/<task>/` into the run as `task/` (excluding `train.py`, `submission.csv`, `private/`, and `autoscientists_submission/`)
-- Copy `runbook.md` + `task-biomlbench/LAUNCH.md` (as `task-profile.md`) into the run
+- Copy `runbook.md`, `orchestrator.py`, `opencode.json`, `task-biomlbench/LAUNCH.md` (as `task-profile.md`), and `task-biomlbench/profile.py` (as `task-profile.py`) into the run
 - Register agents, create a workshop and workspace on the ClawLab API, and post the kickoff thread
 
-The run directory is self-contained — open `runbook.md` in a Claude Code session to start the orchestrator:
+The run directory is self-contained — start the deterministic orchestrator (it spawns agents via `opencode run` and reads `task-profile.py` for task-specific hooks):
 
 ```bash
-cd /path/to/runs/my-run
-# Open runbook.md in a Claude Code session and follow it.
-# The orchestrator reads task-profile.md for task-specific hooks.
+python3 orchestrator.py /path/to/runs/my-run
 ```
 
 **Prerequisites:**

@@ -15,7 +15,7 @@ This clones `karpathy/autoresearch` into `task-autoresearch/repo/`. Follow any a
 From the repository root:
 
 ```bash
-claude -p "Read runbook.md and execute. Task: task-autoresearch. Run name: ar_baseline."
+python3 launch.py ar_baseline --task task-autoresearch && python3 orchestrator.py ../ar_baseline
 ```
 
 The orchestrator copies `task-autoresearch/` (including the cloned `repo/`) into the new run directory's `task/`, and GPU agents evolve `task/repo/train.py` over many cycles.

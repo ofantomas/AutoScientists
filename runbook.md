@@ -1,8 +1,19 @@
-# runbook.md — Orchestrator Runbook (base program)
+# runbook.md — Orchestrator Runbook (design spec)
 
-You are the **orchestrator** for this multi-agent focus area. Your job is to set up and run a system of AI agents that collaboratively work on a benchmark task.
+> **Implementation note.** This file is the **design specification** behind
+> `orchestrator.py`. It used to be executed directly by an LLM (a Claude Code
+> session wielding the `Agent`/`Task` tool); it is now realized as the
+> deterministic Python program `orchestrator.py`, which spawns agents as
+> `opencode run` sessions via `system/runtime.py`. The `Agent(...)` / `Task(...)`
+> / `model="sonnet"` snippets below are therefore **illustrative pseudocode** —
+> the runnable equivalents live in `orchestrator.py` and each task's
+> `task-profile.py`. Read this file to understand *what* the orchestrator does
+> and *why*; read `orchestrator.py` for *how*. See `MIGRATION.md` for the full
+> mapping.
 
-This file is the **base program**: it defines the universal control flow that every task type shares. Task-specific behavior — stop criteria, GPU dispatch policy, champion promotion, discussion rules — lives in `task-profile.md` (selected by `launch.py` based on `task_type` in `task/TASK.md` frontmatter).
+The **orchestrator** sets up and runs a system of AI agents that collaboratively work on a benchmark task.
+
+This file is the **base program**: it defines the universal control flow that every task type shares. Task-specific behavior — stop criteria, GPU dispatch policy, champion promotion, discussion rules — lives in `task-profile.py` (the Python port of each task's `LAUNCH.md`, copied into the run dir by `launch.py` based on `task_type` in `task/TASK.md` frontmatter).
 
 ## How to use this file
 

@@ -34,9 +34,9 @@ nearest LAUNCH.md (bounded to this repo), letting a family-level LAUNCH.md
 cover many subtasks while still allowing per-task overrides. Every task must
 ship a LAUNCH.md somewhere on that walk; there is no generic fallback.
 
-For all task types, after launch the orchestrator reads runbook.md + task-profile.md:
-  cd <run-dir>
-  # Open runbook.md in a Claude Code session and execute it step by step.
+For all task types, after launch run the deterministic orchestrator, which
+spawns agents via opencode and executes runbook.md's control flow as Python:
+  python3 orchestrator.py <run-dir>
 """
 
 import argparse
@@ -241,8 +241,50 @@ if not _task_launch_md:
 shutil.copy2(_task_launch_md, RUN_DIR / "task-profile.md")
 print(f"  Copied: {_task_launch_md.relative_to(TEMPLATE_DIR)} → task-profile.md")
 
+# Resolve and copy the task's executable hook module (profile.py) using the SAME
+# walk-up rule as LAUNCH.md, renamed to task-profile.py so orchestrator.py can
+# import it by a fixed name. LAUNCH.md stays as the human-readable doc; profile.py
+# is the Python port of its hooks that the deterministic orchestrator runs.
+def _find_bundled_file(task_path, template_dir, filename):
+    p = Path(task_path).resolve()
+    template = Path(template_dir).resolve()
+    if template != p and template not in p.parents:
+        cand = p / filename
+        return cand if cand.exists() else None
+    while p != template and p != p.parent:
+        cand = p / filename
+        if cand.exists():
+            return cand
+        p = p.parent
+    return None
+
+_task_profile_py = _find_bundled_file(_task_path, TEMPLATE_DIR, "profile.py")
+if _task_profile_py:
+    shutil.copy2(_task_profile_py, RUN_DIR / "task-profile.py")
+    print(f"  Copied: {_task_profile_py.relative_to(TEMPLATE_DIR)} → task-profile.py")
+else:
+    print(f"  WARNING: no profile.py found by walking up from {_task_path}.")
+    print(f"           orchestrator.py needs task-profile.py to run; see task-*/profile.py.")
+
+# Copy the deterministic orchestrator and the opencode project config into the
+# run dir. (system/runtime.py is already copied as part of system/ above.)
+for _f in ("orchestrator.py", "opencode.json"):
+    _src = TEMPLATE_DIR / _f
+    if _src.exists():
+        shutil.copy2(_src, RUN_DIR / _f)
+        print(f"  Copied: {_f}")
+    else:
+        print(f"  WARNING: {_f} not found in template.")
+
+# Minimal AGENTS.md so opencode has project context when an agent session boots.
+(RUN_DIR / "AGENTS.md").write_text(
+    "# AutoScientists run directory\n\n"
+    "This is an AutoScientists experiment run. Agents are launched by "
+    "`orchestrator.py` and each follows its own `agents/<name>/HEARTBEAT.md`.\n"
+)
+
 if IS_BENCHMARK:
-    print(f"  To run: open {RUN_DIR}/{program_file} in a Claude Code session and follow it.")
+    print(f"  To run: python3 orchestrator.py {RUN_DIR}")
 
 # ── Protein substitution ─────────────────────────────────────
 # If --protein is given, rewrite the placeholder protein name in task/*.md files.
@@ -556,14 +598,17 @@ if len(PREFIX) > 16:
     PREFIX = PREFIX[:6] + PREFIX[-10:]
 
 # Agent roster: name -> (description, role, server, gpu)
+# Eval agents are CPU-eval (role "cpu", no device index) to match sella-run5:
+# candidates are scored on a remote eval pool, not a local GPU. The "cpu" role
+# loads ROLE-CPU.md via role_file_map below.
 AGENTS = {
     f"{PREFIX}_monitor":    ("Focus area monitor — bootstraps, forms teams, monitors health",   "monitor",   "server1", -1),
-    f"{PREFIX}_gpu1":     ("GPU agent 1 — runs experiments on GPU 0",                       "gpu",     "server1",  0),
-    f"{PREFIX}_gpu2":     ("GPU agent 2 — runs experiments on GPU 1",                       "gpu",     "server1",  1),
-    f"{PREFIX}_gpu3":     ("GPU agent 3 — runs experiments on GPU 0",                       "gpu",     "server2",  0),
-    f"{PREFIX}_gpu4":     ("GPU agent 4 — runs experiments on GPU 1",                       "gpu",     "server2",  1),
-    f"{PREFIX}_gpu5":     ("GPU agent 5 — runs experiments on GPU 0",                       "gpu",     "server3",  0),
-    f"{PREFIX}_gpu6":     ("GPU agent 6 — runs experiments on GPU 1",                       "gpu",     "server3",  1),
+    f"{PREFIX}_cpu1":     ("CPU-eval agent 1 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_cpu2":     ("CPU-eval agent 2 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
+    f"{PREFIX}_cpu3":     ("CPU-eval agent 3 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_cpu4":     ("CPU-eval agent 4 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
+    f"{PREFIX}_cpu5":     ("CPU-eval agent 5 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
+    f"{PREFIX}_cpu6":     ("CPU-eval agent 6 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
     f"{PREFIX}_analyst1": ("Analyst 1 — researches mechanisms, proposes experiments",        "analyst", "server1", -1),
     f"{PREFIX}_analyst2": ("Analyst 2 — researches mechanisms, proposes experiments",        "analyst", "server2", -1),
     f"{PREFIX}_analyst3": ("Analyst 3 — researches mechanisms, proposes experiments",        "analyst", "server3", -1),
@@ -605,7 +650,8 @@ def setup_agent(name, desc, role, server, gpu):
     # AGENT.md — the agent's identity file (like CLAUDE.md)
     agent_md_path = agent_dir / "AGENT.md"
     if not agent_md_path.exists():
-        gpu_line = f"GPU agent on GPU {gpu}." if role == "gpu" else f"{role.title()} agent."
+        gpu_line = ("CPU-eval agent — evaluates candidate code on the remote eval pool."
+                    if role in ("gpu", "cpu") else f"{role.title()} agent.")
         agent_md_path.write_text(f"""---
 name: {name}
 role: {role}
@@ -645,11 +691,12 @@ last_val_bpb: null
 
     # Inject role-specific content
     role_file_map = {
-        "gpu": "ROLE-GPU.md",
+        "cpu": "ROLE-CPU.md",       # CPU-eval agents use ROLE-CPU.md
+        "gpu": "ROLE-CPU.md",       # legacy "gpu" alias also maps to the CPU-eval doc
         "analyst": "ROLE-ANALYST.md",
         "monitor": "ROLE-MONITOR.md",
     }
-    role_src = system_dir / role_file_map.get(role, "ROLE-GPU.md")
+    role_src = system_dir / role_file_map.get(role, "ROLE-CPU.md")
     role_content = role_src.read_text() if role_src.exists() else ""
     # Strip frontmatter from role doc (already in heartbeat)
     role_parts = role_content.split("---")
@@ -677,8 +724,8 @@ last_val_bpb: null
 
     (agent_dir / "HEARTBEAT.md").write_text(heartbeat)
 
-    # Copy training repo for GPU agents (optional - only if repo exists)
-    if role == "gpu":
+    # Copy baseline repo for eval agents (optional - only if repo exists)
+    if role in ("gpu", "cpu"):
         dst = agent_dir / "workspace" / "repo"
         repo_source = None
 
@@ -950,7 +997,6 @@ No monitor intervention is required.
     print("=" * 60)
     print("  Launch complete!")
     print("=" * 60)
-    program_file = "runbook.md"
     task_type_label = "biomlbench" if IS_BENCHMARK else ("proteingym" if IS_PROTEINGYM else "optimization")
     print(f"""
   Experiment dir: {ROOT}
@@ -959,9 +1005,9 @@ No monitor intervention is required.
   Agents:        {len(AGENTS)} created in {ROOT / 'agents'}
   Task type:     {task_type_label}
 
-  To run the orchestrator:
+  To run the orchestrator (deterministic Python; spawns agents via opencode):
 
-    claude -p "Read {ROOT / program_file} and execute"
+    python3 orchestrator.py {ROOT}
 """)
 
 

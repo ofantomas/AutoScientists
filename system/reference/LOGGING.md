@@ -13,7 +13,7 @@ Every action in the system is logged for full traceability.
 
 ### How it works
 
-1. GPU agent runs experiment and reports result in its promise message
+1. CPU-eval agent runs experiment and reports result in its promise message
 2. Orchestrator receives the result and writes ONE line to `experiments.jsonl`
 3. This line contains everything needed for stagnation checks and analysis
 
@@ -22,7 +22,7 @@ Every action in the system is logged for full traceability.
 ```json
 {
   "exp_id": "exp_swiglu",
-  "agent": "run01_gpu1",
+  "agent": "run01_cpu1",
   "team": "architecture",
   "metric": 0.998097,
   "champion_before": 1.005071,
@@ -44,6 +44,9 @@ Every action in the system is logged for full traceability.
 ├── logs/
 │   ├── experiments.jsonl       ← CANONICAL (orchestrator writes)
 │   ├── sessions.jsonl          ← One line per agent session (orchestrator writes)
+│   ├── molecule_results/
+│   │   └── {agent}.jsonl       ← Per-molecule eval records, one per eval (CPU agent appends own shard)
+│   ├── run_log.md              ← Consolidated per-molecule view, autoresearch run.log format (orchestrator rebuilds each cycle)
 │   └── raw/
 │       └── {agent}_{timestamp}.log  ← Raw stdout/stderr per session
 │
@@ -57,6 +60,16 @@ Every action in the system is logged for full traceability.
 
 These are all useful for context but `experiments.jsonl` is the one the stagnation check reads.
 
+### Per-molecule results (`molecule_results/` + `run_log.md`)
+
+Advisory per-molecule diagnostics, mirroring the opt_problem autoresearch `run.log`. Each CPU-eval
+agent appends one JSON record per eval to **its own** shard `logs/molecule_results/{agent}.jsonl`
+(full per-molecule table from `eval_candidate.py` — `mol, n_steps, max_steps, rel_steps, rel_energy,
+energy_delta_kcal_mol, converged`, plus `exp_id`, `description`, `outcome`, aggregate metrics).
+Per-agent shards mean concurrent CPU agents never contend on one file. Each cycle the orchestrator
+(runbook Step 5d-bis) rebuilds `logs/run_log.md` fresh from all shards into a human-readable,
+per-experiment table. Analysts may consult these (ROLE-ANALYST Step 1e) but are not required to.
+
 ## 1. sessions.jsonl — Session Tracking
 
 **Written by:** Orchestrator, after each agent session finishes.
@@ -64,8 +77,8 @@ These are all useful for context but `experiments.jsonl` is the one the stagnati
 
 ```json
 {
-  "agent": "run01_gpu1",
-  "role": "gpu",
+  "agent": "run01_cpu1",
+  "role": "cpu",
   "team": "architecture",
   "session_id": "uuid",
   "started_at": "2026-03-29T10:00:00Z",
@@ -85,8 +98,8 @@ These are all useful for context but `experiments.jsonl` is the one the stagnati
 **Failed session:**
 ```json
 {
-  "agent": "run01_gpu2",
-  "role": "gpu",
+  "agent": "run01_cpu2",
+  "role": "cpu",
   "team": "optimizer",
   "started_at": "2026-03-29T10:00:05Z",
   "ended_at": "2026-03-29T10:20:05Z",
@@ -127,15 +140,15 @@ def log_session(agent, role, team, started, status, experiments, error=None):
 
 ## 2. experiments.jsonl — Experiment Tracking
 
-**Written by:** GPU agents, after each experiment.
+**Written by:** CPU-eval agents, after each experiment.
 **Format:** One JSON line per experiment.
 
 ```json
 {
   "exp_id": "exp_kv_shift_identity_init",
-  "agent": "run01_gpu1",
+  "agent": "run01_cpu1",
   "team": "architecture",
-  "run_id": "run_001_gpu1",
+  "run_id": "run_001_cpu1",
   "champion_baseline": 0.990,
   "metric": 0.985,
   "delta": -0.005,
@@ -147,7 +160,7 @@ def log_session(agent, role, team, started, status, experiments, error=None):
 }
 ```
 
-**GPU agent writes this:**
+**CPU-eval agent writes this:**
 ```python
 with open(f"{FOCUS_ROOT}/logs/experiments.jsonl", "a") as f:
     f.write(json.dumps(experiment_entry) + "\n")
@@ -169,7 +182,7 @@ claude -p "..." 2>&1 | tee logs/raw/${AGENT}_$(date +%Y%m%d_%H%M%S).log
 **Format:** Human-readable markdown, auto-truncated at 100 lines.
 
 ```markdown
-## Session 2026-03-29T10:00:00Z — run01_gpu1
+## Session 2026-03-29T10:00:00Z — run01_cpu1
 
 ### State
 - Champion: 0.990 (run_baseline)
@@ -189,7 +202,7 @@ claude -p "..." 2>&1 | tee logs/raw/${AGENT}_$(date +%Y%m%d_%H%M%S).log
 
 ```yaml
 ---
-agent: run01_gpu1
+agent: run01_cpu1
 last_seen: "2026-03-29T10:08:30Z"
 status: idle
 session_count: 5

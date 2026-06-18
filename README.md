@@ -4,7 +4,7 @@
 
 **AutoScientists** is a decentralized team of AI agents for long-running computational scientific experimentation. Unlike prior agent systems that follow a single research trajectory or coordinate through a central planner, AutoScientists agents **self-organize into teams** around promising hypotheses, **critique each other's proposals** before spending experimental compute, and **share successes and failures** so the system avoids redundant exploration and sustains parallel search as evidence accumulates over hours or days.
 
-This repository packages the system as [Claude Code](https://docs.claude.com/claude-code) subagents coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). The orchestrator is a pure coordinator — it launches agents and harvests their results, never trains anything itself.
+This repository packages the system as [opencode](https://opencode.ai) agent sessions coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). A deterministic Python orchestrator (`orchestrator.py`) is a pure coordinator — it launches agents and harvests their results, never trains anything itself. See [`MIGRATION.md`](MIGRATION.md) for the architecture and the port from Claude Code.
 
 ## Results
 
@@ -22,9 +22,15 @@ Three bundled task families (per-task data prep and details live in each `task-<
 
 ## Setup
 
-Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and the [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`).
+Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and the [opencode](https://opencode.ai) CLI (`opencode`).
 
 ```bash
+# Install opencode (the agent runtime)
+npm install -g opencode-ai          # or: curl -fsSL https://opencode.ai/install | bash
+
+# Authenticate a model provider (Anthropic by default — see opencode.json)
+export ANTHROPIC_API_KEY=...        # or: opencode auth login
+
 # Start the local ClawInstitute server (agents will all coordinate through this)
 npx clawinstitute start
 
@@ -32,19 +38,26 @@ npx clawinstitute start
 pip install -r requirements.txt
 ```
 
+opencode resolves models via [models.dev](https://models.dev); the friendly
+labels the system uses (`sonnet`/`opus`) map to `provider/model` strings in
+[`system/runtime.py`](system/runtime.py) and can be overridden with
+`AUTOSCI_MODEL_SONNET` / `AUTOSCI_MODEL_OPUS`. Confirm available IDs with
+`opencode models anthropic`.
+
 `npx clawinstitute start` downloads the [`clawinstitute`](https://www.npmjs.com/package/clawinstitute) package from npm on first run and starts the server in the foreground; subsequent runs reuse the cache. Prefer a permanent install? `npm install -g clawinstitute`, then `clawinstitute start`.
 
 ## Running
 
-From the repo root, in a separate shell:
+From the repo root, first materialize a run directory with `launch.py`, then run
+the orchestrator against it:
 
 ```bash
-claude -p "Read runbook.md and execute. Task: task-autoresearch. Run name: ar_v1."
-claude -p "Read runbook.md and execute. Task: task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca. Run name: lipo_v1."
-claude -p "Read runbook.md and execute. Task: task-protein-gym. Run name: spike_v1."
+python3 launch.py ar_v1   --task task-autoresearch                                            && python3 orchestrator.py ../ar_v1
+python3 launch.py lipo_v1 --task task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca && python3 orchestrator.py ../lipo_v1
+python3 launch.py spike_v1 --task task-protein-gym                                            && python3 orchestrator.py ../spike_v1
 ```
 
-Each launch materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, and logs; the template itself stays clean across runs. Hardware requirements vary per task — see each `task-<name>/README.md`.
+`launch.py` materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, logs, `orchestrator.py`, and the task's `task-profile.py`; the template itself stays clean across runs. `orchestrator.py` is a pure-Python coordinator that spawns each agent as an `opencode run` session and runs `runbook.md`'s control flow. Hardware requirements vary per task — see each `task-<name>/README.md`.
 
 ## Adding a new task
 

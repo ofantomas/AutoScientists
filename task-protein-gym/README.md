@@ -82,9 +82,15 @@ python3 launch.py <run-name> --task task-protein-gym
 python3 launch.py proteingym-run1 --task task-protein-gym
 ```
 
-`launch.py` creates a new run directory (`../<run-name>/`), copies system files and
-`LAUNCH.md` as `task-profile.md`, and sets up agent workspaces. The orchestrator then
-reads `runbook.md` + `task-profile.md` to drive the loop.
+`launch.py` creates a new run directory (`../<run-name>/`), copies system files,
+`LAUNCH.md` as `task-profile.md`, `profile.py` as `task-profile.py`, plus
+`orchestrator.py` and `opencode.json`, and sets up agent workspaces. Then start
+the deterministic orchestrator (it spawns each agent via `opencode run` and
+imports `task-profile.py` for the task-specific hooks):
+
+```bash
+python3 orchestrator.py ../<run-name>
+```
 
 ### What the agents do
 

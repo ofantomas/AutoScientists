@@ -13,7 +13,7 @@ You research mechanisms, propose experiments, and maintain team knowledge. You d
 
 1. **No team → no work.** Enforced by HEARTBEAT Part 0.
 2. **Every proposal MUST have a complete API trail:** POST [PROPOSAL] to workshop AND PATCH team queue.md. Local-only notes don't count.
-3. **You never run training.** Not even a "quick baseline check." Propose; let GPU agents execute.
+3. **You never run training.** Not even a "quick baseline check." Propose; let CPU-eval agents execute.
 
 ### Rule 2, restated because it is the #1 failure mode for this role
 
@@ -25,7 +25,7 @@ Past failure mode (gpt-nano-agents 2026-05-26 cycle 2 — three of three haiku
 analysts hit it): the agent writes elaborate `memory/cycle_N_work.md`
 documenting the proposals it "would" make, updates AGENT.md with a summary,
 emits its promise tag, and finishes — but never calls `POST /posts`. The
-workshop sees zero new posts, the queue is never refilled, GPU agents idle,
+workshop sees zero new posts, the queue is never refilled, CPU-eval agents idle,
 and the orchestrator must relaunch with explicit "post first or your cycle
 is incomplete" framing.
 
@@ -270,52 +270,16 @@ gets evaluated through your team's LENS — does it support your
 hypothesis? Different teams may propose the same axis for different
 reasons; that is the intended form of collective reasoning.
 
-### Step 0.5 — Lazy Noise-Floor Calibration — REQUIRED
+### Step 0.5 — Deterministic Evaluation (No Noise Floor) — NOTE
 
-Do NOT queue upfront baseline_seed probes. They consume experiments
-before any real search has happened. Instead, noise data accumulates
-passively from the GPU multi-seed gate (Step 7.0): every time a
-borderline KEEP triggers a second-seed re-run, the resulting (code_hash,
-metric_a, metric_b) point is appended to
-`knowledge/noise_floor_data.md` in the main workspace.
-
-Before applying any near-miss or promotion rule, read it:
-
-```python
-nf_data_raw = requests.get(
-    f"{API}/workspaces/{MAIN_WS_ID}/files/knowledge/noise_floor_data.md",
-    headers=HEADERS).json()
-points = parse_pairs(nf_data_raw.get("content", ""))  # list of (a, b) for same code
-
-if len(points) >= 3:
-    diffs = [abs(a - b) for a, b in points]
-    sigma = statistics.stdev([x for ab in points for x in ab])  # or pooled σ
-    mde = 2 * sigma
-else:
-    # Insufficient data — use a conservative default band
-    sigma = None
-    mde = 0.003  # conservative until data accumulates
-```
-
-**Rules when no empirical noise floor exists yet:**
-
-- Use the conservative band (|Δ| < 0.003) — do NOT close axes inside it.
-- The multi-seed gate in GPU Step 7.0 will supply data organically as
-  experiments fire; don't pay experiments for measurement you'll get
-  for free.
-- Once n≥3 pairs exist in `noise_floor_data.md`, σ is the empirical
-  pooled-seed std and the conservative default retires.
-
-**Lock rule (REQUIRED).** Once n ≥ 5 pairs have been collected, the
-noise floor is LOCKED. Later pairs update σ only as a smoothed
-average; they do NOT retroactively reclassify existing DISCARDs.
-Reason: observed in prior runs, late analysts kept re-declaring σ,
-reopening and reclosing the same "closed" axes. Rule: after lock, σ
-is a running estimate for NEW experiments only. Prior DISCARDs stay
-DISCARD regardless of σ drift.
-
-Write a single boolean flag in `knowledge/noise_floor.md` frontmatter:
-`locked: true` once n≥5, and include the value of σ at lock time.
+Evaluation is deterministic (sigma=0, verified end-to-end): re-running
+the same code produces the identical metric. There is no measurement
+noise floor, no near-miss band, and no multi-seed confirmation. Any
+strictly-better valid result is real. Do NOT queue baseline_seed /
+noise-floor probes, do NOT read or maintain `noise_floor.md` /
+`noise_floor_data.md`, and do NOT apply a noise band when deciding
+whether a delta is signal. A non-improving valid delta is simply a
+DISCARD; an improving valid delta is a KEEP.
 
 ### Step 0.7 — Discussion-Backlog Ledger — REQUIRED
 
@@ -390,62 +354,17 @@ results = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/search?q={MY_TEAM}",
 
 Analyze: which mechanisms worked? Which families have 3+ DISCARDs?
 
-### Step 1a — Noise Floor Rule — REQUIRED
+### Step 1a — Deterministic Deltas (No Near-Miss Band) — NOTE
 
-Every evaluation metric has a measurement noise floor — repeated runs of the
-same config produce slightly different scores. A single "near-miss" DISCARD
-whose delta is inside that noise band is **indistinguishable from having
-changed nothing**. It is NOT a gradient, NOT a signal, and does NOT justify a
-follow-up fine-bracket experiment.
-
-**You MUST read the current empirical noise floor from
-`knowledge/noise_floor.md` (team-local) or the main-workspace canonical
-noise file before applying this rule.** Do NOT use hardcoded thresholds.
-If the file does not exist, the noise floor is unknown and you must not
-close any axis on single-sample evidence; instead, post a `[SUGGESTION]`
-requesting a seed-variance infrastructure probe and treat all recent
-near-miss DISCARDs as "axis remains open, not enough data." Once the
-file exists, the meaningful quantities for this rule are the composite
-1σ (combining cross-seed and same-seed components, if known) and the 2σ
-and 4σ multiples of it — use those as the near-miss band, not any
-historical fixed number.
-
-Rules when auditing recent DISCARDs against that band:
-
-- **Delta inside the noise band, only 1 data point on the axis:**
-  - Do NOT add the axis to `dead_ends.md` — it is still open
-  - Do NOT propose a fine-bracket follow-up from this single point
-  - Require **at least 2 data points** on the axis before either action
-- **Delta clearly outside the noise band (positive or negative):** treat as
-  real signal and proceed normally
-- **2+ DISCARDs inside the noise band pointing opposite directions:** the
-  axis is flat in this neighborhood — close it in `dead_ends.md` as "flat,
-  no gradient"
-
-**Far / opposite probe rule (extends the above):** when a single near-miss
-is your ONLY signal on an axis, the next proposal on that axis must be
-either (a) a **far probe** — a value much further from the current optimum
-than the near-miss — or (b) an **opposite-direction probe** — a value on
-the other side of the current optimum. Do NOT propose a fine-bracket
-half-way between the current optimum and the near-miss. Fine-brackets are
-only legitimate after a 2-point monotone trend has already been
-established. This rule prevents near-miss avalanches where each
-fine-bracket re-confirms noise and closes nothing.
-
-**Bracketed-minimum pre-refinement check:** before approving ANY fine-bracket
-refinement around a bracketed minimum, compute `best_observed_delta - 0`
-and compare it to the noise floor. **If the best bracketed delta is
-already above the noise band, refining the bracket cannot reach a KEEP** —
-the axis is arithmetically exhausted even though the shape looks
-"interesting". Close the axis in `dead_ends.md` instead of spending another
-slot on a refinement that can at best re-confirm the shallow trough.
-A 3-point bracket whose minimum is already above noise-band is a closed
-axis, not a candidate for a 4th point.
-
-**Why this matters:** without a noise-floor check, near-misses trigger
-fine-bracket follow-ups that mostly re-confirm noise, consuming GPU budget
-while adding no information. Enforce the rule even when a result "feels
-close" to a KEEP.
+Evaluation is deterministic (sigma=0): any strictly-better valid result is
+real and any recorded delta is exact. There is no measurement noise floor
+and no near-miss band — do NOT treat a small non-improving delta as
+"indistinguishable from no change," do NOT read `noise_floor.md`, and do
+NOT require multiple data points on an axis to trust a delta. A DISCARD
+delta is the true response at that point; a KEEP is a true improvement.
+Fine-bracket refinement is still a legitimate search move where the shape
+warrants it — judge it on whether the trend can plausibly reach a strict
+improvement, not on a noise band.
 
 ### Step 1b — KEEP Followup Harvest — REQUIRED
 
@@ -524,7 +443,7 @@ import re, json
 from pathlib import Path
 
 # 1. Extract ALL named numeric assignments from champion code
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 
 # Layer 1: Top-level named constants (UPPER_CASE = value)
 layer1 = re.compile(r"^\s*([A-Z_][A-Z0-9_]*)\s*[:=]\s*([0-9]+\.?[0-9]*)", re.MULTILINE)
@@ -592,7 +511,7 @@ If a parameter has no coverage and no obvious reason to be left alone, it's a le
 `knowledge/baseline_coverage.md` every cycle. The file must contain a
 literal table with columns: `parameter | current_value | tested? | result
 summary`. Do not skip this — the table is what makes untested constants
-visible to GPU agents and other analysts. Constants that "look like they
+visible to CPU-eval agents and other analysts. Constants that "look like they
 shouldn't be changed" (e.g., numeric constants inside math functions,
 magic numbers in optimizer code, hardcoded frequencies or window sizes)
 are often the highest-value targets because nobody questions them.
@@ -681,7 +600,7 @@ from being unable to discharge their own merge.
 **Do not defer.** Phrases like "the alphabetically-last-analyst rule
 applies to next rotation" or "I'm non-affected so I'll skip" are bugs.
 If conditions 1-4 hold THIS cycle, enactment is mandatory THIS cycle.
-A pending merge wastes one GPU slot per rotation it remains unenacted.
+A pending merge wastes one eval slot per rotation it remains unenacted.
 
 ```python
 # 1. Read current roster
@@ -714,7 +633,7 @@ requests.post(f"{API}/posts", headers=HEADERS, json={
 })
 
 # 5. Mark the dissolved team's queue.md as archived (frontmatter
-#    `team_status: dissolved`) so any GPU agent cycled into it via
+#    `team_status: dissolved`) so any CPU-eval agent cycled into it via
 #    a stale launch sees the dissolution and routes to the new team.
 ```
 
@@ -728,73 +647,30 @@ to rewrite the same roster.md (If-Match would catch it but produces
 spurious 409 noise and unclear ownership). Same arbitration rule as
 Step 0.25 cold-start bootstrap.
 
-**Failure mode this guards against:** in prior runs, analysts who were
-not in the dissolving team consistently deferred enactment thinking
-"I'm non-affected, this isn't my job." Meanwhile analysts who WERE in
-the dissolving team couldn't enact (often the proposer or unable to
-self-vouch). Result: GPU agents in the dissolving team lost 3+
-consecutive cycles of work waiting for the merge to be enacted by
-nobody. This step exists to break that deadlock — the enactor is
-explicitly NOT required to be affected.
+**Why:** this breaks a deadlock where neither the affected nor the non-affected
+analysts enact the merge — so the enactor is explicitly NOT required to be affected.
 
 If none of the conditions hold, this step is a no-op — proceed to Step 1e.
 
-### Step 1e — Compute-Budget Audit — REQUIRED UNCONDITIONALLY
+### Step 1e — Per-Molecule Diagnostics (advisory)
 
-**This step OVERRIDES team STANDBY, formal dormancy, partial-wake,
-wake-for-one, and any other "don't propose this cycle" state.** Those
-states mean the team's dimension is exhausted at the current compute
-budget — they do NOT mean the compute budget itself is exhausted. If
-the budget is not binding, STANDBY is the wrong state: the team's
-dimension may be tapped out but a larger compute configuration is a
-strictly new search space that the team has not explored. Run this
-audit and post the required proposal even if your team is in STANDBY
-or dormant. The proposal unblocks the team from its own STANDBY.
+`fitness` (`mean_rel_steps`) is averaged over the 250 train molecules and hides *where* the optimizer
+struggles. Per-molecule data is **available** if you want to ground a proposal in a specific
+molecule/chemistry signal — consulting it is optional, not required:
 
-Extract the most recent champion run's compute utilization (from its
-training log, `champion.md` frontmatter, or the linked result file —
-whichever your task records it in). Look for:
+- `{FOCUS_ROOT}/logs/run_log.md` — per experiment, the full per-molecule table
+  (`mol n_steps max_steps rel_steps rel_energy energy_delta_kcal_mol conv`), mirroring the
+  autoresearch `run.log`. (Raw per-agent shards: `{FOCUS_ROOT}/logs/molecule_results/*.jsonl`.)
+- `{FOCUS_ROOT}/task/molecule_smiles.tsv` — `mol_id → name, n_atoms, formula, SMILES` for the train
+  set, so a molecule id maps to real chemistry.
 
-- **Memory headroom** — e.g. peak VRAM used vs available, peak RAM used
-  vs available, or the analogous memory resource on your hardware.
-- **Compute efficiency** — e.g. measured FLOPs/s vs theoretical peak,
-  MFU, GPU utilization %, or the analogous throughput metric.
+Signals to look for, when you choose to: molecules with high `rel_steps` are where the step budget
+goes; `energy_delta_kcal_mol` near 1.0 means a molecule sits at the validity gate; `conv == 0` is a
+distinct (non-convergence) failure class.
 
-Compare against the available budget:
-
-- **If memory utilization < ~70% OR compute efficiency < ~50%**, the
-  current training run is NOT binding against the compute budget. Idle
-  capacity is the largest untouched axis in the search space. Your
-  highest-priority `[PROPOSAL]` this cycle MUST be a **scale-up probe**:
-  a change that increases compute consumed per step, such as larger
-  batch size, larger model width/depth, longer sequence length, more
-  training steps per budget, or lifting any `*_OVERRIDE` constant that
-  was inherited from a smaller-model baseline. The second proposal
-  may be on any axis your team's hypothesis predicts is productive.
-
-- **If memory utilization ≥ ~70% AND compute efficiency ≥ ~50%**, the
-  run is binding — proceed to normal proposal workflow.
-
-A scale-up probe is always in-scope for any team — teams are
-hypothesis-based, not axis-based. If your team's hypothesis doesn't
-predict the scale-up probe will KEEP, propose it anyway (it is still
-mandatory) but note the tension: either a KEEP here falsifies your
-hypothesis or its DISCARD supports it.
-
-**Why this step is mandatory and unconditional:** if the compute
-budget is the largest underutilized resource, every search within the
-current budget is exploring a strict subset of the reachable
-hypothesis space. Tuning within a 50%-of-peak configuration while the
-other 50% sits idle is a known failure mode of team-dimension-bounded
-search. This step breaks out of it.
-
-**Task-portability note:** the exact thresholds (70% memory, 50%
-compute) are defaults. If your task or hardware has a different
-practical utilization target, record the correct thresholds in
-`teams/noise_floor.md` or `task/TASK.md` and read them here instead.
-The principle — "if the budget isn't binding, scale-up is your
-highest-priority probe" — applies regardless of the specific
-numbers.
+**Do not let this narrow the search.** You are NOT required to target the single worst molecule, and
+proposals that chase one stiff molecule tend to regress the others or tip the energy gate. Keep your
+proposals diverse and treat per-molecule data as one input among many. Proceed to Step 2.
 
 ### Step 2 — Prune Dead Ends
 
@@ -803,17 +679,9 @@ Rules: **3+ DISCARDs, 0 KEEPs** → dead end. **2 DISCARDs, 0 KEEPs** → downgr
 **You MUST write dead_ends.md to the team workspace** when a family is ruled out. Other agents
 discover it via LIST and skip those families in their dedup check.
 
-**Noise-contamination re-triage (REQUIRED).** Before adding new entries,
-walk the existing `dead_ends.md` and mark any entry whose recorded
-|delta| is smaller than the team's **current** measured noise floor as
-`NOISE-CONTAMINATED — axis remains open`. Do NOT delete these entries;
-downgrade them so the baseline coverage audit (Step 1c) can find them as
-legitimate targets again. Many closures written under earlier
-(speculative) noise-floor estimates no longer pass the real-data bar,
-and those closures have been narrowing the search space artificially.
-Flushing contaminated entries over successive rotations restores the
-productive surface area without losing institutional memory about
-which experiments were run.
+Because evaluation is deterministic (sigma=0), recorded DISCARD deltas are
+exact — do NOT re-triage existing dead_ends as "noise-contaminated." A
+closed axis stays closed on its real measured deltas.
 
 ```python
 import yaml as _yaml
@@ -878,7 +746,7 @@ team_hits = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/search?q={mechanism_key
 # If the mechanism family has 3+ DISCARDs, do NOT propose variations of it
 
 # 3. CHECK THE CHAMPION CODE — the mechanism may already be implemented!
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 if mechanism_keyword.lower() in champion_code.lower():
     print(f"SKIP: {mechanism_keyword} already exists in champion code!")
     # Do NOT propose — find something genuinely new instead
@@ -902,7 +770,7 @@ if "PATTERN:FALSIFIED" in de_content:
 Include in your [PROPOSAL] post:
 - **Prior results:** list any related experiments and their outcomes
 - **Why this is different:** explain what distinguishes this from prior attempts
-- **Verified not in champion code:** confirm you checked train.py
+- **Verified not in champion code:** confirm you checked algo.py
 - **No EXPERIMENT_ID gating:** the proposed diff must be unconditional — never gate behind `if EXPERIMENT_ID == "exp_foo"`. This causes improvements to silently disappear when the next agent changes the ID.
 - **Confidence:** high/medium/low with expected delta range
 
@@ -918,7 +786,7 @@ Check that your team's strategy.md matches the actual champion config:
 ### Step 3d — External-Repo Proposals
 
 If you are proposing an experiment that uses a GitHub repo or pretrained
-checkpoint, your proposal MUST include full setup details or GPU agents will
+checkpoint, your proposal MUST include full setup details or CPU-eval agents will
 skip it. Follow the checklist in:
 
 ```
@@ -938,7 +806,7 @@ been implemented as part of a later champion update, or may reference
 variables that no longer exist.
 
 ```python
-champion_code = open(f"{FOCUS_ROOT}/champion/train.py").read()
+champion_code = open(f"{FOCUS_ROOT}/champion/algo.py").read()
 for item in shortlist:
     # Grep for each distinctive token from the item description
     if all(tok.lower() in champion_code.lower() for tok in item.key_tokens):
@@ -988,15 +856,16 @@ Write the full table to `knowledge/axis_priors.md`:
 ```
 axis           | direction | n | mean_|Δ| | status
 warmdown_ratio | increase  | 0 |    -     | COLD (exploration bonus)
-warmdown_ratio | decrease  | 5 |  0.0008  | flat (below 2σ)
+warmdown_ratio | decrease  | 5 |  0.0008  | flat (small |Δ|)
 embedding_lr   | increase  | 1 |  0.0042  | COLD
 ...
 ```
 
 **Use this ranking in Step 5:** high mean |Δ| axes go first; cold
-axes get exploration bonus (also front of queue); axes with mean |Δ|
-below the current noise floor get deprioritized unless they satisfy
-the ambition quota.
+axes get exploration bonus (also front of queue). Evaluation is
+deterministic, so there is no noise floor — do not deprioritize axes
+on a noise-band basis; rank purely on empirical |Δ| and cold-axis
+exploration bonus.
 
 ### Step 3.4 — Bracket Rule for Cold Numeric Axes — REQUIRED
 
@@ -1017,7 +886,7 @@ proposals: [
 
 **Rationale:** single-point probes on a new axis give zero shape
 information. A 3-point bracket gives the direction AND curvature of
-the response in one rotation's worth of GPU time, eliminating the 3+
+the response in one rotation's worth of eval time, eliminating the 3+
 rotations of sequential value-picking that currently dominate
 rotation overhead. If the bracket shows a clear minimum or monotone
 trend, the axis is already mostly characterized — one follow-up
@@ -1028,7 +897,7 @@ refinement probe is enough.
   single-value proposals.
 - Axes with ≥1 prior data point — use the opposite-direction rule
   instead of a full bracket.
-- Infrastructure probes (baseline, noise floor pairs).
+- Infrastructure probes (e.g. baseline).
 
 **Still counts as 1 proposal toward the cycle's ambition quota** —
 bracket = 1 decision, 2-3 queue items.
@@ -1142,13 +1011,13 @@ strong claim and should be backed by specific evidence (exhaustion of
 the bold-move categories above, not just "my team is tired").
 
 **Why this rule exists:** absent an explicit ambition quota, the
-default proposal shape trends toward small, safe, noise-floor-adjacent
+default proposal shape trends toward small, safe, marginal
 probes. Over many rotations this produces an apparent "stagnation"
 that is really just avoidance of bold moves. The quota forces at
 least one genuinely new experiment per analyst cycle and makes the
 social cost of NOT being ambitious explicit (via the `[EXEMPT]`
 requirement). It is orthogonal to all other steps — you can satisfy
-it using proposals that still pass noise-floor, dedup, pattern-
+it using proposals that still pass dedup, pattern-
 reference, and team-structure rules.
 
 ```python
@@ -1222,7 +1091,7 @@ re-proposal with no stated difference is rejected.
 de_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/dead_ends.md",
                       headers=HEADERS).json()
 de_content = de_raw.get("content", "")
-# Dead-ends are written as structured entries (see GPU Step 7). Parse
+# Dead-ends are written as structured entries (see CPU Step 7). Parse
 # them and check (axis, direction) range overlap with your proposal.
 ```
 
@@ -1234,11 +1103,11 @@ over the failure with a comment.
 Wait for at least 1 comment **from a non-author** on your [PROPOSAL] before
 adding to queue. A comment from the proposer themselves (you) does NOT
 count — it defeats the purpose of Discussion-Before-Queuing, which is to
-catch mechanism errors and duplicates before GPU time is burned.
+catch mechanism errors and duplicates before eval time is burned.
 
 If no non-author comment exists yet when you post, still add the item to
-queue with `discussion_pending: true` so GPU agents know to wait one
-rotation. GPU agents must refuse to claim any `discussion_pending: true`
+queue with `discussion_pending: true` so CPU-eval agents know to wait one
+rotation. CPU-eval agents must refuse to claim any `discussion_pending: true`
 item unless it now has a non-author comment (or unless the item has been
 sitting unclaimed for more than N rotations, to avoid deadlocks when the
 team is small).
@@ -1276,7 +1145,8 @@ if exp_id not in existing_ids:
     #   information per experiment
     # - COLD axes (n<3) get exploration bonus next
     # - Other axes sorted by mean |Δ| descending
-    # - Proposals inside the current noise band go last
+    # (Evaluation is deterministic — no noise band, so nothing is
+    #  pushed to the back on a below-noise basis.)
     from collections import Counter
     axis_dir_counts = Counter(
         (it.get("axis"), it.get("direction")) for it in pending if it.get("axis")
@@ -1295,8 +1165,7 @@ if exp_id not in existing_ids:
         if key in cold_axes:
             return (0, 0)      # exploration bonus
         score = axis_scores.get(key, 0)
-        below_noise = score < float(noise_floor_sigma or 0)
-        return (2 if below_noise else 1, -score)
+        return (1, -score)
     pending.sort(key=_rank)
 
     updated_fm = {"claims": claims, "pending": pending}
@@ -1326,7 +1195,7 @@ for n in notifs.get("data", []):
     post = requests.get(f"{API}/posts/{post_id}", headers=HEADERS).json()
     title = post.get("title", "")
     # Reply if you have something substantive to add (not just acknowledgement)
-    # Priority: [NEAR-MISS] follow-ups, [DISCUSSION] threads, replies to your [PROPOSAL]s
+    # Priority: [DISCUSSION] threads, replies to your [PROPOSAL]s
     print(f"Notification: {title[:80]}")
 ```
 
@@ -1343,7 +1212,7 @@ Examples:
 ## Write Permissions
 
 **Team workspace:** Can create and update any file (queue, dead_ends, strategy, analysis docs, etc.)
-**Main workspace:** Read-only. GPU agents write results and champion updates.
+**Main workspace:** Read-only. CPU-eval agents write results and champion updates.
 **Posts/comments:** Can create proposals, discussions, and comments.
 
 When creating new files, use descriptive paths — see Part 4 (Team Coordination) § File Naming Convention.

@@ -41,5 +41,5 @@ task-autoresearch/
 ## Run
 
 ```bash
-claude -p "Read runbook.md and execute. Task: task-autoresearch. Run name: ar_baseline."
+python3 launch.py ar_baseline --task task-autoresearch && python3 orchestrator.py ../ar_baseline
 ```

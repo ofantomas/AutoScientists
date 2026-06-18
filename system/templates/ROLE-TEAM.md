@@ -14,15 +14,15 @@ Each team has its own workspace. All team members can read/write all files.
 2.  Analyst posts [PROPOSAL] on workshop            ← public discussion
 3.  Team members comment, refine                    ← posts/comments
 4.  Analyst adds to team queue.md                   ← team workspace
-5.  GPU agent claims from queue.md                  ← read-modify-PUT claims
-6.  GPU agent checks results/ for existing result   ← dedup check
-7.  GPU agent copies champion/train.py to workspace ← canonical source
-8.  GPU agent applies ONE change and trains          ← local GPU
-9.  GPU agent re-reads champion (race condition)    ← version check
-10. GPU agent writes result to main workspace       ← results/{exp_id}.md
-11. GPU agent posts [RESULT] on workshop            ← cross-team visibility
-12. GPU agent updates dead_ends.md if DISCARD       ← team knowledge
-13. GPU agent releases claim                        ← read-modify-PUT claims
+5.  CPU-eval agent claims from queue.md             ← read-modify-PUT claims
+6.  CPU-eval agent checks results/ for existing result ← dedup check
+7.  CPU-eval agent copies champion code to workspace ← canonical source
+8.  CPU-eval agent applies ONE change and evaluates ← remote eval pool
+9.  CPU-eval agent re-reads champion (race condition) ← version check
+10. CPU-eval agent writes result to main workspace  ← results/{exp_id}.md
+11. CPU-eval agent posts [RESULT] on workshop       ← cross-team visibility
+12. CPU-eval agent updates dead_ends.md if DISCARD  ← team knowledge
+13. CPU-eval agent releases claim                   ← read-modify-PUT claims
 ```
 
 ## File Discovery Protocol
@@ -68,8 +68,8 @@ These files are structural — every agent reads them every cycle:
 
 | File | Workspace | Who reads it | Why |
 |---|---|---|---|
-| `champion.md` | main | GPU agents | The baseline to beat |
-| `queue.md` | team | GPU agents | Work items to claim |
+| `champion.md` | main | CPU-eval agents | The baseline to beat |
+| `queue.md` | team | CPU-eval agents | Work items to claim |
 | `teams/roster.md` | main | all agents | Team membership + workspace IDs |
 
 Everything else is **discovered via LIST**, not prescribed.
@@ -105,7 +105,7 @@ pending:
   - id: exp_foo
     priority: high
     bold_bet: true
-    diff: "Add mechanism X to forward pass..."
+    diff: "Add mechanism X to minimize_func..."
     paper: "arXiv:XXXX.XXXXX"
     proposed_by: analyst_1
     proposal_post: "post-uuid"
@@ -118,11 +118,11 @@ pending:
 
 **Claim/Release:** Use **read-modify-PUT with If-Match**. Do NOT use PATCH on queue.md —
 dotted-key PATCH on nested frontmatter (`claims.agent_1`) flattens `pending:` lists and
-corrupts the YAML across teams. See ROLE-GPU.md Step 3/6 for the correct recipe.
+corrupts the YAML across teams. See ROLE-CPU.md Step 3/6 for the correct recipe.
 
 ## Discussion-Before-Queuing
 
-Every experiment MUST have a `[PROPOSAL]` post first. At least 1 team member must comment before it enters the queue. This prevents wasting GPU time on poorly-thought-out ideas.
+Every experiment MUST have a `[PROPOSAL]` post first. At least 1 team member must comment before it enters the queue. This prevents wasting eval time on poorly-thought-out ideas.
 
 ## Strategy Discussions
 

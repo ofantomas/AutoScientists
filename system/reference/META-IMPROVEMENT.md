@@ -34,7 +34,7 @@ Before forming any opinion, read what actually happened:
 - Each team's `queue.md` — are there pending experiments? are queues going empty? are the same ideas appearing repeatedly?
 - Workshop posts — are agents posting substantive [RESULT] and [INSPIRATION] content, or formulaic boilerplate? are ideas being picked up across teams?
 - `champion/SOURCE` — when did the champion last improve? how many cycles ago?
-- `system/templates/ROLE-ANALYST.md` and `ROLE-GPU.md` — what are agents actually being asked to do?
+- `system/templates/ROLE-ANALYST.md` and `ROLE-CPU.md` — what are agents actually being asked to do?
 
 Read the real files. Do not rely on memory or assumptions.
 
@@ -55,7 +55,7 @@ Identify the single most significant dysfunction. Be specific and honest. Some t
 - Teams are working in isolation when they should be learning from each other
 
 **Pipeline problems**
-- GPU agents are waiting for work because analyst queues ran dry
+- CPU-eval agents are waiting for work because analyst queues ran dry
 - Experiments are being proposed that are obviously redundant across teams
 - Agents are spending time on infrastructure issues rather than experiments
 
@@ -79,7 +79,7 @@ Based on your diagnosis, make the most direct fix you can. Edit the relevant fil
 
 **What you can change:**
 - `system/templates/ROLE-ANALYST.md` — how analysts propose and prioritize experiments
-- `system/templates/ROLE-GPU.md` — how compute agents run experiments and share results
+- `system/templates/ROLE-CPU.md` — how compute agents run experiments and share results
 - `system/reference/*.md` — coordination protocols and shared guidelines
 - `task/TASK.md` or `task/LAUNCH.md` — task clarity, hints, evaluation guidance
 - Team `queue.md` files directly — seed experiments if queues are empty
@@ -109,7 +109,7 @@ cycle   pattern_diagnosed           file_changed                    outcome
 6       low_keep_rate               system/templates/ROLE-ANALYST.md applied
 9       queue_empty                 agents/team_a/workspace/...     seeded_queue
 12      duplicate_proposals         system/templates/ROLE-ANALYST.md applied
-15      role_doc_contradiction      system/templates/ROLE-GPU.md     applied
+15      role_doc_contradiction      system/templates/ROLE-CPU.md     applied
 ```
 
 Include a one-line note on what you changed and why. This record lets future meta-improvement steps see what was already tried.
@@ -120,7 +120,7 @@ Include a one-line note on what you changed and why. This record lets future met
 
 **If the champion hasn't improved in 5+ cycles:** The team is stuck. Look at whether proposals are genuinely diverse or converging on a local optimum. Consider whether the role docs are steering agents away from high-risk/high-reward ideas.
 
-**If queues are repeatedly going empty:** Analysts aren't keeping up with GPU agents. Either increase proposal diversity expectations, or check whether analysts are getting stuck on infrastructure issues.
+**If queues are repeatedly going empty:** Analysts aren't keeping up with CPU-eval agents. Either increase proposal diversity expectations, or check whether analysts are getting stuck on infrastructure issues.
 
 **If KEEP rate is high but metric gain per KEEP is small:** The team is making incremental progress but not exploring enough. The role docs may be too conservative — penalizing bold proposals.
 
@@ -136,7 +136,7 @@ Include a one-line note on what you changed and why. This record lets future met
 
 ### Task Specification Drift (2026-04-03)
 
-All GPU agents used the wrong data split because example code in TASK.md contradicted the prose. Agents trusted the example over the text.
+All CPU-eval agents used the wrong data split because example code in TASK.md contradicted the prose. Agents trusted the example over the text.
 
 **Lesson:** When agents systematically make the same mistake, look at the role docs and task docs for an instruction that is ambiguous or contradictory. Fix the source, not the symptom.
 

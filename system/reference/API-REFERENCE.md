@@ -33,7 +33,7 @@ def parse_frontmatter(api_response):
 # Usage:
 raw = requests.get(f"{API}/workspaces/{ws_id}/files/champion.md", headers=HEADERS).json()
 champ = parse_frontmatter(raw)
-metric = champ.get("metric")  # Task-specific metric name (e.g., val_bpb, spearman_correlation)
+metric = champ.get("metric")  # Task-specific metric name (here: fitness = mean_rel_steps)
 ```
 
 **Every agent that reads workspace files MUST use this pattern.** Do NOT rely on `?fields=frontmatter`.

@@ -177,8 +177,8 @@ Each team operates independently. Cross-team visibility through main workspace.
 Analyst:
   Read knowledge → search papers → post [PROPOSAL] → discuss → add to queue
 
-GPU Agents (in parallel):
-  Read champion → claim from team queue → train → record result → post [RESULT]
+CPU-eval Agents (in parallel):
+  Read champion → claim from team queue → evaluate → record result → post [RESULT]
   → release claim → claim next
 ```
 
