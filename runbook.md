@@ -20,6 +20,13 @@ No matter what happens — agents time out, agents fail, queues are empty — th
 **NEVER STOP. NEVER ASK PERMISSION. LOOP CONTINUOUSLY.**
 Once the execution loop begins (Step 5), keep cycling until the profile's `exit_condition` hook returns True or the user hits Ctrl+C. Do not pause to ask "should I keep going?" after 3, 5, 10, or any number of cycles. The user may be away for hours or days. Keep agents busy, relaunch them when they finish, fix problems autonomously.
 
+**CODEX-ONLY ORCHESTRATION.**
+Launch every AS agent with Codex subagent tools. If `multi_agent_v1.*` is not already available in
+your tool list, first use `tool_search` for "spawn subagent" and then use the exposed
+`multi_agent_v1.spawn_agent`, `multi_agent_v1.wait_agent`, `multi_agent_v1.send_input`,
+`multi_agent_v1.close_agent`, and `multi_agent_v1.resume_agent` tools. Do not use shell-launched
+LLM processes for AS agents from this runbook.
+
 ## Step 0 — Determine state
 
 ```python
@@ -91,6 +98,10 @@ task_md   = (FOCUS_ROOT / "task" / "TASK.md").read_text()
 task_meta = parse_fm(task_md)
 task_name = task_meta.get("name", "task")
 PREFIX    = (FOCUS_ROOT / "AGENT_PREFIX").read_text().strip() if (FOCUS_ROOT / "AGENT_PREFIX").exists() else FOCUS_ROOT.name
+
+# Optional pilot controls. Defaults keep production behavior open-ended and full-roster.
+CODEX_AS_MAX_CYCLES = int(os.environ.get("CODEX_AS_MAX_CYCLES", "0") or 0)
+CODEX_AS_CPU_AGENT_LIMIT = int(os.environ.get("CODEX_AS_CPU_AGENT_LIMIT", "0") or 0)
 ```
 
 → PROFILE HOOK: `bootstrap_extras` (e.g. eval-head/Redis reachability check — set any extra variables this profile needs)
@@ -107,6 +118,32 @@ task/TASK.md                       — the task problem definition
 task-profile.md                    — the task-specific hooks (the rest of *your* program is right here in runbook.md)
 ```
 
+### Codex subagent launch contract
+
+For every AS agent launch, call `multi_agent_v1.spawn_agent` with:
+
+```python
+{
+    "agent_type": "default",
+    "fork_context": False,
+    "reasoning_effort": "xhigh",
+    "message": prompt,
+}
+```
+
+Do not set a model override. The spawned subagent inherits the orchestrator's configured model.
+Keep a mapping of `agent_name -> {"id": spawned_id, "started_at": iso_timestamp, "role": role}`.
+When the cycle reaches the wait step, call `multi_agent_v1.wait_agent` on outstanding IDs, parse the
+returned final message for `<promise>`, append `logs/sessions.jsonl`, then call
+`multi_agent_v1.close_agent` for each completed AS subagent. If a subagent must be redirected during
+recovery, use `multi_agent_v1.send_input`; if a previously closed subagent needs inspection, use
+`multi_agent_v1.resume_agent`.
+
+If `spawn_agent` reports an active-subagent/thread limit, treat that as normal Codex backpressure:
+wait for the current batch, log and close completed agents, then launch the remaining agents. The
+full requested roster must still run unless a test-only limit such as `CODEX_AS_CPU_AGENT_LIMIT` is
+explicitly set.
+
 ## Step 3 — Dimension discussion
 
 → PROFILE HOOK: `discussion_policy` (defines whether discussion runs, when, and any extra prompt content)
@@ -118,29 +155,33 @@ The base launch pattern (used if the profile says "run discussion"):
 import os
 non_admin_agents = [a for a in os.listdir(FOCUS_ROOT / "agents") if "monitor" not in a]
 
+discussion_runs = {}
 for agent_name in non_admin_agents:
-    Agent(
-        description=f"{agent_name} discussion",
-        prompt=(
-            f"You are {agent_name}.\n"
-            f"FOCUS_ROOT={FOCUS_ROOT}\n"
-            f"MODE=discussion\n"  # REQUIRED — routes the agent to HEARTBEAT Part 2
-            f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
-            f"You MUST start at Part 0 (Mode Selector). Do not skip ahead.\n"
-            f"{extra_discussion_instructions}"   # from the profile hook
-        ),
-        run_in_background=True,
-        # model unset → inherit the orchestrator (opus). Run everything on opus-4.8.
+    prompt = (
+        f"You are {agent_name}.\n"
+        f"AGENT_NAME={agent_name}\n"
+        f"FOCUS_ROOT={FOCUS_ROOT}\n"
+        f"MODE=discussion\n"  # REQUIRED — routes the agent to HEARTBEAT Part 2
+        f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
+        f"You MUST start at Part 0 (Mode Selector). Do not skip ahead.\n"
+        f"{extra_discussion_instructions}"   # from the profile hook
     )
+    # Tool call: multi_agent_v1.spawn_agent(agent_type="default",
+    #     fork_context=False, reasoning_effort="xhigh", message=prompt)
+    discussion_runs[agent_name] = {
+        "id": spawned_agent_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "role": "discussion",
+    }
+
+# Wait for discussion_runs through multi_agent_v1.wait_agent, log sessions, and close completed agents.
+# If Codex reaches its active-subagent limit, run the discussion roster in batches until every
+# non-monitor agent has participated.
 ```
 
-> **Model choice.** Haiku-class analysts have a documented "describe instead of
-> do" failure mode in this workflow: they write elaborate local memory files
-> claiming the work is done but never call the workshop API, leaving the queue
-> unrefilled. Empirically reproduced in the 2026-05-26 gpt-nano-agents run —
-> three of three haiku analysts hallucinated "no API available in this
-> environment." Always use **sonnet or opus** for analysts; reserve haiku for
-> deterministic mechanical work outside this loop.
+> **Reasoning effort.** AS agents must be launched with `reasoning_effort="xhigh"` so analyst,
+> monitor, and CPU-eval sessions have enough budget to read the heartbeat, call the API, and finish
+> the write-back path before emitting their promise.
 
 **`MODE=discussion` is mandatory.** Without it, the heartbeat's Mode Selector cannot route CPU-eval agents to the Discussion branch, and they will fall through to "no team → exit" or freelance experiments.
 
@@ -148,20 +189,27 @@ for agent_name in non_admin_agents:
 
 ## Step 4 — Form teams + seed queues
 
-Launch the monitor agent to read discussion posts and form teams.
+Launch the monitor agent to read discussion posts and form teams. For cold-start Sella-style runs,
+the monitor resolves team formation after one bounded discussion round; do not wait for perfect
+consensus or repeated `[DISCUSS-DONE]` votes before the first eval dispatch.
 
 ```python
-Agent(
-    description="monitor forms teams",
-    prompt=(
-        f"You are {PREFIX}_monitor.\n"
-        f"FOCUS_ROOT={FOCUS_ROOT}\n"
-        f"MODE=execute\n"
-        f"Read {FOCUS_ROOT}/agents/{PREFIX}_monitor/HEARTBEAT.md and follow it.\n"
-        f"You MUST start at Part 0 (Mode Selector).\n"
-        f"{extra_monitor_instructions}"   # from the profile hook
-    ),
+monitor_name = f"{PREFIX}_monitor"
+prompt = (
+    f"You are {monitor_name}.\n"
+    f"AGENT_NAME={monitor_name}\n"
+    f"FOCUS_ROOT={FOCUS_ROOT}\n"
+    f"MODE=execute\n"
+    f"Read {FOCUS_ROOT}/agents/{monitor_name}/HEARTBEAT.md and follow it.\n"
+    f"You MUST start at Part 0 (Mode Selector).\n"
+    f"If teams/roster.md is empty, resolve cold-start team formation now: create three "
+    f"hypothesis-based team workspaces, write teams/roster.md with phase=executing, and post "
+    f"[TEAM-REFORMED]. Do not run experiments or write results.\n"
+    f"{extra_monitor_instructions}"   # from the profile hook
 )
+# Tool call: multi_agent_v1.spawn_agent(agent_type="default",
+#     fork_context=False, reasoning_effort="xhigh", message=prompt)
+# Wait for the monitor with multi_agent_v1.wait_agent, log the session, and close it.
 ```
 
 Verify teams were formed:
@@ -198,6 +246,10 @@ while True:
 
     if exit_condition():     # ← PROFILE HOOK
         break
+
+    if CODEX_AS_MAX_CYCLES and cycle_count >= CODEX_AS_MAX_CYCLES:
+        print(f"CODEX_AS_MAX_CYCLES={CODEX_AS_MAX_CYCLES}; stopping after pilot cycle.")
+        break
 ```
 
 ### 5a. Pre-cycle check
@@ -206,32 +258,34 @@ while True:
 
 ### 5b. Launch analysts IN PARALLEL
 
-Analysts run on CPU. **Use `sonnet` (or `opus`), never `haiku`** — see model
-note in Step 3. Launch all 3 in a single message and wait.
+Analysts run as Codex subagents. Launch all 3 in parallel with `reasoning_effort="xhigh"` and wait.
 
 **Every launch prompt in Step 5 must include `MODE=execute`** so the heartbeat Mode Selector routes the agent to Part 4 (Normal Cycle).
 
 ```python
 analysts = [f"{PREFIX}_analyst{i}" for i in (1, 2, 3)]
 
-# Send ONE message with all 3 Task calls (parallel)
+analyst_runs = {}
 for analyst_name in analysts:
-    Task(
-        subagent_type="general-purpose",
-        # model unset on purpose → inherit the orchestrator's model (opus). Analysts do the
-        # creative hypothesis/proposal work — the hardest job — so they get the stronger model.
-        description=f"{analyst_name} cycle",
-        prompt=(
-            f"You are {analyst_name}.\n"
-            f"FOCUS_ROOT={FOCUS_ROOT}\n"
-            f"MODE=execute\n"
-            f"Read {FOCUS_ROOT}/agents/{analyst_name}/HEARTBEAT.md and follow it.\n"
-            f"Start at Part 0 (Mode Selector).\n"
-            f"{analyst_prompt_extras}"   # ← PROFILE HOOK
-            f"When done: <promise>{analyst_name} cycle complete</promise>"
-        ),
+    prompt = (
+        f"You are {analyst_name}.\n"
+        f"AGENT_NAME={analyst_name}\n"
+        f"FOCUS_ROOT={FOCUS_ROOT}\n"
+        f"MODE=execute\n"
+        f"Read {FOCUS_ROOT}/agents/{analyst_name}/HEARTBEAT.md and follow it.\n"
+        f"Start at Part 0 (Mode Selector).\n"
+        f"{analyst_prompt_extras}"   # ← PROFILE HOOK
+        f"When done: <promise>{analyst_name} cycle complete</promise>"
     )
-# Wait for all 3 to complete.
+    # Tool call: multi_agent_v1.spawn_agent(agent_type="default",
+    #     fork_context=False, reasoning_effort="xhigh", message=prompt)
+    analyst_runs[analyst_name] = {
+        "id": spawned_agent_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "role": "analyst",
+    }
+
+# Wait for all analyst_runs through multi_agent_v1.wait_agent, log sessions, and close completed agents.
 ```
 
 → PROFILE HOOK: `analyst_prompt_extras` (extra env vars, deadline reminders, diversity rules — append to the prompt)
@@ -244,12 +298,16 @@ This is the biggest variation between profiles, so the entire body lives in the 
 - Candidate evaluation runs on the remote CPU-eval pool, not on any local device — there is no GPU to contend over.
 - Always set `MODE=execute` in the prompt.
 - Each agent reads its own HEARTBEAT.md — do not embed workspace IDs, team names, or step-by-step instructions in the prompt.
+- The profile may honor `CODEX_AS_CPU_AGENT_LIMIT` for a one-agent migration pilot; when unset or `0`,
+  dispatch the full CPU-eval roster.
 
 ### 5d. Wait and log
 
-When each agent finishes, append a session record:
+When each Codex subagent finishes, append a session record:
 
 ```python
+final_text = completed_status.get("final_message", "") or completed_status.get("message", "")
+promise_received = "<promise>" in final_text
 session = {
     "agent": agent_name,
     "cycle": cycle_count,
@@ -257,6 +315,7 @@ session = {
     "ended_at": datetime.now(timezone.utc).isoformat(),
     "status": "success" if promise_received else "timeout",
     "promise_received": promise_received,
+    "codex_agent_id": codex_agent_id,
 }
 with open(FOCUS_ROOT / "logs" / "sessions.jsonl", "a") as f:
     f.write(json.dumps(session) + "\n")

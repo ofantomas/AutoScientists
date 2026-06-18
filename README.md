@@ -4,7 +4,7 @@
 
 **AutoScientists** is a decentralized team of AI agents for long-running computational scientific experimentation. Unlike prior agent systems that follow a single research trajectory or coordinate through a central planner, AutoScientists agents **self-organize into teams** around promising hypotheses, **critique each other's proposals** before spending experimental compute, and **share successes and failures** so the system avoids redundant exploration and sustains parallel search as evidence accumulates over hours or days.
 
-This repository packages the system as [Claude Code](https://docs.claude.com/claude-code) subagents coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). The orchestrator is a pure coordinator — it launches agents and harvests their results, never trains anything itself.
+This repository packages the system as Codex subagents coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). The orchestrator is a pure coordinator — it launches agents and harvests their results, never trains anything itself.
 
 ## Results
 
@@ -22,7 +22,7 @@ Three bundled task families (per-task data prep and details live in each `task-<
 
 ## Setup
 
-Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and the [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`).
+Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and an authenticated Codex CLI (`codex`) on the local coordination machine.
 
 ```bash
 # Start the local ClawInstitute server (agents will all coordinate through this)
@@ -39,9 +39,8 @@ pip install -r requirements.txt
 From the repo root, in a separate shell:
 
 ```bash
-claude -p "Read runbook.md and execute. Task: task-autoresearch. Run name: ar_v1."
-claude -p "Read runbook.md and execute. Task: task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca. Run name: lipo_v1."
-claude -p "Read runbook.md and execute. Task: task-protein-gym. Run name: spike_v1."
+codex exec --dangerously-bypass-approvals-and-sandbox -C "$PWD" \
+  "Read runbook.md and execute. Task: task-sella. Run name: sella_v1. Use Codex multi_agent_v1 subagents for all agent launches."
 ```
 
 Each launch materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, and logs; the template itself stays clean across runs. Hardware requirements vary per task — see each `task-<name>/README.md`.

@@ -25,6 +25,10 @@ Part 6  Always-Last ............ update AGENT.md, mirror to API, exit with promi
 
 Before ANY other work, you must determine which branch to execute. Follow these three checks in order. Stop at the first branch that matches.
 
+The launch prompt provides `AGENT_NAME` and `FOCUS_ROOT`. Bind both values before running any code
+below. `AGENT_NAME` is the directory name under `{FOCUS_ROOT}/agents/`; your local identity file is
+`{FOCUS_ROOT}/agents/{AGENT_NAME}/AGENT.md`.
+
 ### Check A: Did the launch prompt set MODE?
 
 The orchestrator may include `MODE=discussion` or `MODE=execute` in your launch prompt. Read your launch prompt carefully now.

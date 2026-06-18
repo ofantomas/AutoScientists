@@ -31,7 +31,7 @@ ship a LAUNCH.md somewhere on that walk; there is no generic fallback.
 
 For all task types, after launch the orchestrator reads runbook.md + task-profile.md:
   cd <run-dir>
-  # Open runbook.md in a Claude Code session and execute it step by step.
+  # Open runbook.md in a Codex session and execute it step by step.
 """
 
 import argparse
@@ -87,6 +87,39 @@ _args = _parser.parse_args()
 ADMIN_TOKEN = _load_token()
 HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}", "Content-Type": "application/json"}
 
+
+def _load_eval_config():
+    """Load eval-head settings that get injected into CPU-eval agent heartbeats."""
+    required = {
+        "EVAL_HOST": "ssh target that runs eval_candidate.py",
+        "EVAL_REDIS_HOST": "Redis host as seen from the eval head",
+        "REDIS_PORT": "Redis port as seen from the eval head",
+        "SELLA_CHECKOUT": "opt_problem checkout path on the eval head",
+        "EVAL_PYTHON": "Python executable from the eval-head gigaopt environment",
+    }
+    missing = [f"{name} ({desc})" for name, desc in required.items() if not os.environ.get(name)]
+    if missing:
+        print("ERROR: missing eval-head deployment parameters:")
+        for item in missing:
+            print(f"  - {item}")
+        print("Set them before launch. See LAUNCH_GUIDE.md Deployment parameters.")
+        sys.exit(1)
+
+    redis_port = os.environ["REDIS_PORT"]
+    try:
+        int(redis_port)
+    except ValueError:
+        print(f"ERROR: REDIS_PORT must be an integer, got {redis_port!r}")
+        sys.exit(1)
+
+    return {
+        "EVAL_HOST": os.environ["EVAL_HOST"],
+        "EVAL_REDIS_HOST": os.environ["EVAL_REDIS_HOST"],
+        "EVAL_REDIS_PORT": redis_port,
+        "SELLA_CHECKOUT": os.environ["SELLA_CHECKOUT"],
+        "EVAL_PYTHON": os.environ["EVAL_PYTHON"],
+    }
+
 RUN_NAME = _args.name or f"{TEMPLATE_DIR.name}_{_TIMESTAMP}"
 PARENT_DIR = Path(_args.output_dir).resolve() if _args.output_dir else TEMPLATE_DIR.parent
 
@@ -124,6 +157,8 @@ if not (_task_path / "TASK.md").exists():
     print(f"  Example:")
     print(f"    python3 launch.py my-run --task task-sella")
     sys.exit(1)
+
+EVAL_CONFIG = _load_eval_config()
 
 print(f"Creating experiment: {RUN_DIR}")
 RUN_DIR.mkdir(parents=True)
@@ -498,6 +533,12 @@ AGENTS = {
 NOW = datetime.now(timezone.utc).isoformat()
 
 
+def _inject_eval_config(text):
+    for key, value in EVAL_CONFIG.items():
+        text = text.replace(f"{{{{{key}}}}}", str(value))
+    return text
+
+
 def setup_agent(name, desc, role, server, gpu):
     """Create local agent directory with credentials, AGENT.md, memory/."""
     agent_dir = AGENTS_DIR / name
@@ -528,7 +569,7 @@ def setup_agent(name, desc, role, server, gpu):
         creds_path.write_text(json.dumps({"api_key": token, "agent_name": name}, indent=2))
         creds_path.chmod(0o600)
 
-    # AGENT.md — the agent's identity file (like CLAUDE.md)
+    # AGENT.md — per-agent identity file read from agents/<name>/AGENT.md
     agent_md_path = agent_dir / "AGENT.md"
     if not agent_md_path.exists():
         if role in ("cpu", "gpu"):  # "gpu" is a legacy alias for the CPU-eval role
@@ -585,6 +626,8 @@ last_fitness: null
     role_parts = role_content.split("---")
     if len(role_parts) >= 3:
         role_content = "---".join(role_parts[2:]).strip()
+    if role in ("gpu", "cpu"):
+        role_content = _inject_eval_config(role_content)
 
     team_src = system_dir / "ROLE-TEAM.md"
     team_content = ""
@@ -695,8 +738,10 @@ def main():
             headers={**HEADERS, "X-Agent-Name": name},
         )
         if r.status_code < 300:
-            action = r.json().get("action", "")
-            if action in ("subscribed", "already_subscribed"):
+            subscribe_result = r.json()
+            action = subscribe_result.get("action", "")
+            is_subscribed = subscribe_result.get("subscribed") is True
+            if is_subscribed or action in ("subscribed", "already_subscribed"):
                 subscribed += 1
             else:
                 print(f"  Warning: {name} subscribe returned {r.status_code} {r.text[:120]}")
@@ -732,6 +777,7 @@ def main():
         "ablation": str(ROOT),
         "protein": PROTEIN_TARGET or PROTEIN_PLACEHOLDER,
         "task_type": _task_type,
+        "eval": EVAL_CONFIG,
         "agents": list(AGENTS.keys())
     }, indent=2))
     print(f"  Saved WORKSPACE_ID, WORKSHOP_NAME, and run_metadata.json")
@@ -887,7 +933,7 @@ No monitor intervention is required.
 
   To run the orchestrator:
 
-    claude -p "Read {ROOT / program_file} and execute"
+    codex exec --dangerously-bypass-approvals-and-sandbox -C "{ROOT}" "Read {ROOT / program_file} and execute. Use Codex multi_agent_v1 subagents for all agent launches."
 """)
 
 

@@ -351,7 +351,7 @@ whether to run this experiment or pick a lighter one from the queue instead.
 ### Step 4 — Apply Change and Evaluate
 
 Apply ONE change from the experiment's diff to `algo.py`, then **block synchronously** on the remote
-eval. Detached / fire-and-forget evaluation is forbidden: if the agent's claude session ends before
+eval. Detached / fire-and-forget evaluation is forbidden: if the agent session ends before
 parsing the eval JSON, the real metric is computed but never recorded — the entire cycle's work
 vanishes. The agent MUST wait for the `ssh` eval call to return and then run Steps 5–8 in the same
 session.
@@ -384,11 +384,11 @@ if not diff_applied:
 **Eval-head connection parameters** (the remote sella checkout serving the worker pool):
 
 ```python
-EVAL_HOST       = "cpu-33"      # eval-head a002dc-0002 (local ssh alias cpu-33): scp candidate here, ssh in to run the eval
-EVAL_REDIS_HOST = "localhost"   # Redis host as seen from the eval head
-EVAL_REDIS_PORT = 6390          # Redis port as seen from the eval head (a002dc-0002 local redis, no tunnel)
-SELLA_CHECKOUT  = "/home/tsypin/opt_problem_as_sella"   # checkout on the eval head; eval_candidate.py is at its root
-EVAL_PYTHON     = "/home/tsypin/miniconda3/envs/gigaopt/bin/python"
+EVAL_HOST       = "{{EVAL_HOST}}"        # injected by launch.py from $EVAL_HOST
+EVAL_REDIS_HOST = "{{EVAL_REDIS_HOST}}"  # injected by launch.py from $EVAL_REDIS_HOST
+EVAL_REDIS_PORT = {{EVAL_REDIS_PORT}}    # injected by launch.py from $REDIS_PORT
+SELLA_CHECKOUT  = "{{SELLA_CHECKOUT}}"   # injected by launch.py from $SELLA_CHECKOUT
+EVAL_PYTHON     = "{{EVAL_PYTHON}}"      # injected by launch.py from $EVAL_PYTHON
 ```
 
 **Run the deterministic CPU eval.** `scp` the candidate `algo.py` to a UNIQUE remote path
@@ -755,7 +755,7 @@ timestamp: {datetime.now(timezone.utc).isoformat()}
 
 1. Copy `{FOCUS_ROOT}/champion/algo.py`
 2. scp it to the eval head and run from the sella checkout:
-   `python eval_candidate.py --program <remote algo.py> --redis-host localhost --redis-port 6390`
+   `python eval_candidate.py --program <remote algo.py> --redis-host <redis-host> --redis-port <redis-port>`
 3. Expected: {metric_name} = {champion_metric} (deterministic — exact match every run)
 
 ## Provenance
@@ -945,4 +945,3 @@ simply a DISCARD; the structured dead-end entry carries the signal analysts need
 ### Step 10 — Run Second Experiment
 
 Go back to Step 2 for a second experiment before finishing your session.
-

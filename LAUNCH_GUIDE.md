@@ -4,9 +4,8 @@ This guide takes a **new operator** from nothing to a running AutoScientists (AS
 molecular-geometry optimizer (`algo.py`), end to end: the ClawInstitute coordination server, the xTB
 evaluation pool (Redis + distributed workers + tunnels), and the orchestrator launch.
 
-**This guide is host-agnostic.** It never hardcodes machine names or worker/host counts — *you* supply
-those in the [Deployment parameters](#deployment-parameters-set-these-first) block below, and every
-command references them. Pick your hosts and pool size to match your cluster and the run's needs.
+**This guide is parameterized.** It does not hardcode machine names, Redis ports, checkout paths, or
+worker counts. Set the deployment parameters below for the cluster and run you are launching.
 
 > If you only want to *add a worker host* to an already-running pool, skip to
 > [Part C](#part-c--scale-out-remote-worker-hosts-optional) or use the `setup-xtb-worker-host` skill.
@@ -16,7 +15,7 @@ command references them. Pick your hosts and pool size to match your cluster and
 ## 0. How the system is wired (read this first)
 
 AS for this task has **two independent planes**. They never share a process and talk over the
-network in exactly two ways: the orchestrator launches Claude Code subagents, and the CPU-eval agents
+network in exactly two ways: the orchestrator launches Codex subagents, and the CPU-eval agents
 `ssh` into the eval head to score candidates.
 
 ```
@@ -24,8 +23,8 @@ network in exactly two ways: the orchestrator launches Claude Code subagents, an
  ┌───────────────────────────────────────┐           ┌──────────────────────────────────────────┐
  │ Coordinator host                       │           │ Eval head                                  │
  │                                        │  ssh +     │                                            │
- │  claude  ── orchestrator (runbook.md)  │  scp algo  │  redis-server  (eval queue)                │
- │    │  spawns Claude Code subagents:    │ ─────────▶ │  distributed_validate workers (consume)    │
+ │  codex   ── orchestrator (runbook.md)  │  scp algo  │  redis-server  (eval queue)                │
+ │    │  spawns Codex subagents:          │ ─────────▶ │  distributed_validate workers (consume)    │
  │    ├─ 1 monitor                        │            │  eval_candidate.py  (producer, per call)   │
  │    ├─ 6 cpu-eval  ───────────────────────────────▶ │  opt_problem sella checkout + molecules/   │
  │    └─ 3 analysts                       │            └──────────────────────────────────────────┘
@@ -37,7 +36,7 @@ network in exactly two ways: the orchestrator launches Claude Code subagents, an
                                                       └──────────────────────────────────────────┘
 ```
 
-- **Coordination plane** runs on the **coordinator**: the `claude` orchestrator, the 10 Claude Code
+- **Coordination plane** runs on the **coordinator**: the `codex` orchestrator, the 10 Codex
   subagents (a fixed roster set by `launch.py`: 1 monitor + 6 cpu-eval + 3 analysts), and the
   **ClawInstitute** server — a local message-board/workspace API on `http://localhost:3000` that is
   the agents' shared brain. *No xTB here.*
@@ -56,15 +55,16 @@ decoupled. You choose, via the parameters below.
 ## Deployment parameters (set these first)
 
 Decide your topology and pool size, then export these in every shell where you run the commands
-below. None of them are baked into this guide — they are *your* choices for *this* launch.
+below. None of them are baked into this guide — they are your choices for this launch.
 
 ```bash
 # --- Coordination plane ---
-COORD_HOST=<coordinator-host>     # runs ClawInstitute + the claude orchestrator + the 10 subagents
+COORD_HOST=<coordinator-host>     # runs ClawInstitute + the Codex orchestrator + the 10 subagents
 
-# --- Evaluation plane (must agree with system/templates/ROLE-CPU.md — see note) ---
+# --- Evaluation plane (injected into CPU-eval agent heartbeats by launch.py) ---
 EVAL_HOST=<eval-head-host>        # ssh target that runs Redis + workers + eval_candidate.py
                                   #   (may be the same as COORD_HOST)
+EVAL_REDIS_HOST=<redis-host>      # Redis host as seen from commands running on EVAL_HOST
 REDIS_PORT=<eval-redis-port>      # port of the eval Redis on EVAL_HOST
 SELLA_CHECKOUT=<path-on-eval>     # opt_problem sella checkout on EVAL_HOST (eval_candidate.py at root)
 EVAL_PYTHON=<python-on-eval>      # python from the gigaopt env on EVAL_HOST
@@ -75,14 +75,10 @@ WORKER_HOSTS="<host> <host> ..."  # OPTIONAL extra worker hosts besides EVAL_HOS
                                   #   leave empty to run workers only on EVAL_HOST)
 ```
 
-> **Keep these in sync with the agents' contract.** The CPU-eval agents read the eval target from
-> `system/templates/ROLE-CPU.md` (`EVAL_HOST`, `EVAL_REDIS_PORT`, `SELLA_CHECKOUT`, `EVAL_PYTHON`).
-> Read the committed values and make your parameters match them — or edit the template **before
-> launch** so they match your hosts (it is injected into every agent's `HEARTBEAT.md` at launch;
-> editing a per-run copy afterward won't propagate):
-> ```bash
-> grep -nE "EVAL_HOST|EVAL_REDIS_PORT|SELLA_CHECKOUT|EVAL_PYTHON" system/templates/ROLE-CPU.md
-> ```
+> **These values become the agents' eval contract.** `launch.py` reads `EVAL_HOST`,
+> `EVAL_REDIS_HOST`, `REDIS_PORT`, `SELLA_CHECKOUT`, and `EVAL_PYTHON` from the coordinator shell and
+> injects them into every CPU-eval agent's generated `HEARTBEAT.md`. If any are missing, launch
+> aborts before creating a run directory.
 
 **ssh-alias note (if your cluster uses them):** always pass the **real hostname** to
 `babysit_validate.sh`, not an ssh alias — the alias may not resolve from a remote host. If a worker
@@ -94,7 +90,7 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
 
 | Role | Host | Ports | Runs |
 |---|---|---|---|
-| Coordinator | `$COORD_HOST` | 3000 (ClawInstitute) | `claude` orchestrator + 10 subagents + ClawInstitute |
+| Coordinator | `$COORD_HOST` | 3000 (ClawInstitute) | `codex` orchestrator + 10 subagents + ClawInstitute |
 | Eval head | `$EVAL_HOST` | `$REDIS_PORT` (Redis) | Redis + xTB worker pool + `eval_candidate.py` |
 | Extra workers (opt.) | each of `$WORKER_HOSTS` | local→`$REDIS_PORT` (tunnel) | xTB worker pool only |
 
@@ -104,9 +100,8 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
 
 **On the coordinator (`$COORD_HOST`):**
 - [Node.js 22+](https://nodejs.org/) (ships `npx`) — for the ClawInstitute server.
-- The [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`), logged in. If `claude -p`
-  reports "Not logged in", run `claude setup-token` once (a desktop OAuth session is **not**
-  inherited by spawned `claude -p`).
+- The Codex CLI (`codex`), authenticated on the coordinator. Codex is not required on eval-only
+  hosts.
 - Python 3.9+ with `pip install -r requirements.txt` (just `requests`, `pyyaml`).
 - This `autoscientists/` repo, checked out on the branch you want to run.
 
@@ -216,7 +211,7 @@ SSH tunnel itself — see Part C.
 does):
 
 ```bash
-python eval_candidate.py --program algo.py --split train --redis-host localhost --redis-port "$REDIS_PORT"
+python eval_candidate.py --program algo.py --split train --redis-host "$EVAL_REDIS_HOST" --redis-port "$REDIS_PORT"
 ```
 
 Expect a single JSON line ending stdout with `fitness`, `is_valid`, `mean_rel_steps`,
@@ -269,7 +264,10 @@ Back on the **coordinator**, from the template dir on the desired branch, with C
 
 ```bash
 cd <your-checkout>/autoscientists
-claude -p "Read runbook.md and execute. Task: task-sella. Run name: <run-name>"
+codex exec \
+  --dangerously-bypass-approvals-and-sandbox \
+  -C "$PWD" \
+  "Read runbook.md and execute. Task: task-sella. Run name: <run-name>. Use Codex multi_agent_v1 subagents for all agent launches."
 ```
 
 What happens:
@@ -287,13 +285,12 @@ What happens:
    `eval_candidate.py` → parse JSON → record), promote the champion on a valid, strictly-better
    `fitness` (margin ≥ 1e-3), then health/stagnation checks. It runs **open-ended** until you Ctrl+C.
 
-> Re-read the [parameters note](#deployment-parameters-set-these-first): the agents take the eval
-> target from `system/templates/ROLE-CPU.md`. Confirm those values match your `$EVAL_HOST` /
-> `$REDIS_PORT` / `$SELLA_CHECKOUT` / `$EVAL_PYTHON` **before** launching; edit the template (not a
-> per-run copy) if not. Per-run tweaks go in the materialized `../<run-name>/` files, never the template.
+> Re-read the [parameters note](#deployment-parameters-set-these-first): `launch.py` injects those
+> values into the generated CPU-eval agent heartbeats. If you need a different eval target, change
+> the exported env values before launching a new run.
 
-The run uses Claude (Opus). Note: launching the loop with `--model claude-fable-5` on this chemistry
-content trips a safety fallback that silently switches to Opus anyway.
+Codex subagents inherit the orchestrator's configured model and are launched with extra-high
+reasoning effort by the runbook.
 
 ---
 
@@ -336,7 +333,7 @@ A healthy run shows `experiments.jsonl` growing, occasional `KEEP` outcomes lowe
 ## Part F — Stop & clean up
 
 ```bash
-# 1. Stop the orchestrator: Ctrl+C in the `claude -p` shell (open-ended; only you stop it).
+# 1. Stop the orchestrator: Ctrl+C in the `codex exec` shell (open-ended; only you stop it).
 
 # 2. Stop the eval pool (eval head + every worker host). Ctrl+C the babysitter, or:
 ssh "$EVAL_HOST" 'tmux kill-session -t gigaevo_validate_workers'
@@ -361,7 +358,7 @@ cleanup between runs except the Redis queue.
 | `launch.py`: "No API key found" | ClawInstitute not running or token unset → `npx clawinstitute start` and set `CLAWINSTITUTE_TOKEN` (Part A). |
 | CPU-eval agents hang on eval | No workers consuming the queue → start/repair the pool (B4); check `pgrep -fc distributed_validate.worker`. |
 | Candidate scores `is_valid=0` unexpectedly | Stale `molecules/train_XTB.json` on the eval head → copy fresh `train_XTB.json` + `test_XTB.json` (B2). |
-| Evals fail with connection refused | Eval target mismatch between `ROLE-CPU.md` and your actual pool → align `EVAL_HOST`/`EVAL_REDIS_PORT` (Deployment parameters + Part D note). |
+| Evals fail with connection refused | Eval target mismatch between the deployment env and your actual pool → align `EVAL_HOST`/`EVAL_REDIS_HOST`/`REDIS_PORT` (Deployment parameters + Part D note). |
 | `run_log.md` empty / no per-molecule | Eval head running an aggregate-only `eval_candidate.py` → redeploy the per-molecule branch's copy (B1). |
 | Babysitter: "Found existing SSH tunnel … use another local port" | Local tunnel port already in use → pass a different `<local_redis_port>`. |
 | Remote worker can't reach the eval head by name | Pass the **real hostname**; if name resolution fails on that host, use the eval head's **IP**. |
@@ -378,14 +375,15 @@ Set the [Deployment parameters](#deployment-parameters-set-these-first) first, t
 npx clawinstitute start                                  # coordination server :3000
 export CLAWINSTITUTE_TOKEN=<token>
 cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requirements.txt
-claude -p "Read runbook.md and execute. Task: task-sella. Run name: <run-name>"
+codex exec --dangerously-bypass-approvals-and-sandbox -C "$PWD" \
+  "Read runbook.md and execute. Task: task-sella. Run name: <run-name>. Use Codex multi_agent_v1 subagents for all agent launches."
 
 # EVAL HEAD ($EVAL_HOST) — env active, in $SELLA_CHECKOUT
 scp <coord>:.../task-sella/eval_candidate.py "$SELLA_CHECKOUT/eval_candidate.py"     # branch-matching
 scripts/start_redis.sh "$REDIS_PORT"
 tmux new -d -s gigaevo_validate_workers \
   "scripts/babysit_validate.sh localhost $REDIS_PORT $REDIS_PORT $NUM_WORKERS xtb 1.0 false logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
-python eval_candidate.py --program algo.py --split train --redis-host localhost --redis-port "$REDIS_PORT"   # smoke test
+python eval_candidate.py --program algo.py --split train --redis-host "$EVAL_REDIS_HOST" --redis-port "$REDIS_PORT"   # smoke test
 
 # EACH EXTRA WORKER HOST ($WORKER_HOSTS) — env active, in the opt_problem checkout; LOCAL_PORT = any free port
 tmux new -d -s gigaevo_validate_workers \

@@ -106,7 +106,9 @@ init & update, line search / step acceptance, convergence criterion) — not fin
 constant. Each `description` should name the mechanism being changed; the optimized metric is
 `fitness` (`mean_rel_steps`), lower is better, subject to the per-molecule energy gate.
 
-**`extra_monitor_instructions`:** none — monitor forms teams using its default heartbeat behavior.
+**`extra_monitor_instructions`:** cold-start monitor resolves roster formation after the first
+bounded discussion round. It creates three hypothesis-based team workspaces and writes
+`teams/roster.md`; it does not run experiments or write results.
 
 ---
 
@@ -137,10 +139,12 @@ pool, NOT by any device — multiple cpu-eval agents may run concurrently. Each 
 `scp`'d to a **unique** remote path (`/tmp/cand_${AGENT}_${exp}.py`) so concurrent evals never
 collide.
 
-For each cpu-eval agent, launch in its own message:
+For each cpu-eval agent, launch a Codex subagent:
 
 ```python
 eval_agents = [f"{PREFIX}_cpu{i}" for i in range(1, 7)]
+if CODEX_AS_CPU_AGENT_LIMIT:
+    eval_agents = eval_agents[:CODEX_AS_CPU_AGENT_LIMIT]
 
 # Dispatch all 6 cpu-eval agents every cycle (the full roster).
 #
@@ -148,19 +152,26 @@ eval_agents = [f"{PREFIX}_cpu{i}" for i in range(1, 7)]
 # MODE=execute to run the shared baseline, before extended discussion; then
 # dispatch the rest against the seeded queues.
 
+cpu_runs = {}
 for agent_name in eval_agents:
-    Task(
-        subagent_type="general-purpose",
-        description=f"{agent_name} experiment",
-        prompt=(
-            f"You are {agent_name}.\n"
-            f"FOCUS_ROOT={FOCUS_ROOT}\n"
-            f"MODE=execute\n"
-            f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
-            f"Start at Part 0 (Mode Selector).\n"
-            f"When done: <promise>{agent_name} cycle complete</promise>"
-        ),
+    prompt = (
+        f"You are {agent_name}.\n"
+        f"AGENT_NAME={agent_name}\n"
+        f"FOCUS_ROOT={FOCUS_ROOT}\n"
+        f"MODE=execute\n"
+        f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
+        f"Start at Part 0 (Mode Selector).\n"
+        f"When done: <promise>{agent_name} cycle complete</promise>"
     )
+    # Tool call: multi_agent_v1.spawn_agent(agent_type="default",
+    #     fork_context=False, reasoning_effort="xhigh", message=prompt)
+    cpu_runs[agent_name] = {
+        "id": spawned_agent_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "role": "cpu",
+    }
+
+# Wait for cpu_runs through multi_agent_v1.wait_agent, log sessions, and close completed agents.
 ```
 
 No CUDA device pinning, no `CUDA_VISIBLE_DEVICES`, no per-device serialization. HEARTBEAT.md tells

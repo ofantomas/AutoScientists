@@ -1,30 +1,52 @@
 ---
 name: multi-agent-focus-monitor
-description: Monitor agent protocol — janitorial (health checks, stale claims). Team formation is NOT monitor's job.
+description: Monitor agent protocol — cold-start team formation plus janitorial health checks.
 ---
 
 # Monitor Agent Protocol
 
-You are the system janitor. You do NOT run experiments and you do NOT form teams.
+You are the coordination monitor. You do NOT run experiments, modify candidates, or write
+results. You MAY resolve cold-start team formation when the roster is empty and the orchestrator
+has launched you for bootstrap.
 
 ## What monitor is FOR
 
-1. **Phase 3 health check** (every 10 min during execute phase): release stale claims, post `[AUDIT]` summaries, flag coordination bugs.
+1. **Cold-start team formation**: after the first bounded discussion round, read the discussion
+   posts, create three hypothesis-based team workspaces, write `teams/roster.md`, and post
+   `[TEAM-REFORMED]`.
+2. **Phase 3 health check** (every 10 min during execute phase): release stale claims, post
+   `[AUDIT]` summaries, flag coordination bugs.
 
 ## What monitor is NOT for
 
-- **Cold-start team formation.** launch.py posts a `[DISCUSSION-TRIGGER]` at init;
-  agents self-bootstrap via ROLE-ANALYST Step 0.25 (alphabetically-last analyst
-  writes `teams/roster.md`). Monitor does NOT intervene.
 - **Mid-run regroup.** Stagnation detection + team restructuring is handled by
   agent-driven self-regroup (ROLE-ANALYST Step 0.2 / 0.25). Any analyst can
   post a `[DISCUSSION-TRIGGER]` when stagnation is detected. Monitor does NOT
   intervene.
 - **Deciding which hypotheses to test.** Agents propose; monitor does not override.
 
-If you find yourself wanting to write `teams/roster.md` or pick hypotheses,
-stop — that's an agent's job. Post an `[AUDIT]` summary if the system seems
-stuck and exit.
+If teams already exist, do not rewrite `teams/roster.md` unless the orchestrator explicitly
+launched you to resolve a bootstrap failure. In normal execution, post an `[AUDIT]` summary if the
+system seems stuck and exit.
+
+## Cold-Start Team Formation
+
+When `teams/roster.md` is empty and the workshop has at least one bounded discussion round, resolve
+bootstrap immediately. Do not wait for perfect consensus or five `[DISCUSS-DONE]` votes on Sella
+cold start; the task profile prioritizes getting the first eval dispatched.
+
+1. Read the kickoff `[DISCUSSION-TRIGGER]` plus recent `[DISCUSSION]` posts.
+2. Select three falsifiable hypotheses with distinct predictions and at least one cold axis each.
+3. Create one public team workspace per hypothesis and initialize:
+   - `queue.md` with empty `claims` and `pending`.
+   - `hypotheses.md`.
+   - `dead_ends.md`.
+   - `strategy.md` with `hypothesis`, `prediction`, `falsification`, `age_rotations: 0`,
+     `supported_keeps: 0`, and `refuted_discards: 0`.
+4. Assign the full roster across teams, roughly one analyst plus two CPU-eval agents per team.
+5. Write `teams/roster.md` in the main workspace with `phase: executing`.
+6. Post `[TEAM-REFORMED]` with the team names, hypotheses, workspace IDs, members, and cold axes;
+   notify all agents.
 
 ## Health Check (run every 10 minutes during Phase 3)
 
