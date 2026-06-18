@@ -187,11 +187,33 @@ for agent_name in non_admin_agents:
 
 **Expected duration: 3–8 minutes per agent.** All agents post one [DISCUSSION] thread and exit. If any agent runs longer than 15 minutes during discussion phase, something is wrong (likely an old heartbeat or the agent skipped Part 0) — investigate before proceeding.
 
-## Step 4 — Form teams + seed queues
+## Step 4 — Verify teams + seed queues
 
-Launch the monitor agent to read discussion posts and form teams. For cold-start Sella-style runs,
-the monitor resolves team formation after one bounded discussion round; do not wait for perfect
-consensus or repeated `[DISCUSS-DONE]` votes before the first eval dispatch.
+Team formation is agent-owned. The discussion wave above must produce `teams/roster.md` through
+`ROLE-ANALYST.md` Step 0.25: the alphabetically-last analyst that participates in the discussion
+round writes the roster and posts `[TEAM-REFORMED]`. The monitor does not form teams.
+
+Verify teams were formed:
+
+```python
+roster_raw = requests.get(f"{API}/workspaces/{WS_ID}/files/teams/roster.md",
+                          headers=HEADERS).json()
+roster = parse_fm(roster_raw)
+teams  = roster.get("teams", {})
+```
+
+If `teams` is still empty after the first discussion wave, do not ask the monitor to resolve it.
+Launch or resume the alphabetically-last analyst in `MODE=discussion` and explicitly direct it to
+complete `ROLE-ANALYST.md` Step 0.25 using the discussion posts already present. Use the same Codex
+subagent controls (`spawn_agent` or `resume_agent`, then `wait_agent`, log, and `close_agent`) and
+`reasoning_effort="xhigh"`. Re-read `teams/roster.md` afterward and stop with a clear error if it is
+still empty.
+
+```python
+assert len(teams) >= 2, "Teams not formed properly by analyst bootstrap"
+```
+
+After a non-empty roster exists, optionally launch the monitor for its janitorial audit only.
 
 ```python
 monitor_name = f"{PREFIX}_monitor"
@@ -202,24 +224,13 @@ prompt = (
     f"MODE=execute\n"
     f"Read {FOCUS_ROOT}/agents/{monitor_name}/HEARTBEAT.md and follow it.\n"
     f"You MUST start at Part 0 (Mode Selector).\n"
-    f"If teams/roster.md is empty, resolve cold-start team formation now: create three "
-    f"hypothesis-based team workspaces, write teams/roster.md with phase=executing, and post "
-    f"[TEAM-REFORMED]. Do not run experiments or write results.\n"
+    f"Do not form teams, write teams/roster.md, run experiments, or write results. "
+    f"Audit the existing roster/queues and report stale claims or coordination bugs.\n"
     f"{extra_monitor_instructions}"   # from the profile hook
 )
 # Tool call: multi_agent_v1.spawn_agent(agent_type="default",
 #     fork_context=False, reasoning_effort="xhigh", message=prompt)
 # Wait for the monitor with multi_agent_v1.wait_agent, log the session, and close it.
-```
-
-Verify teams were formed:
-
-```python
-roster_raw = requests.get(f"{API}/workspaces/{WS_ID}/files/teams/roster.md",
-                          headers=HEADERS).json()
-roster = parse_fm(roster_raw)
-teams  = roster.get("teams", {})
-assert len(teams) >= 2, "Teams not formed properly"
 ```
 
 → PROFILE HOOK: `seeding_policy` (defines who seeds queues and how — orchestrator-seeded vs monitor-seeded, what to put in each team's queue)

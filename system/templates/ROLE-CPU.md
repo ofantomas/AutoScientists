@@ -116,8 +116,8 @@ champ_version = champ_raw.get("version", 0)  # Save for race condition check lat
 # Copy it to your workspace before making changes. `algo.py` is the ONLY file
 # you edit and the ONLY file the evaluator needs — there is no prepare.py /
 # pyproject.toml / uv.lock for this task. The evaluator (eval_candidate.py,
-# validate.py, molecules/, metrics.yaml) lives in the sella checkout on the
-# remote eval head; you never copy it locally.
+# validate.py, molecules/, metrics.yaml) lives in the configured eval checkout
+# on the remote eval head; you never copy it locally.
 import shutil
 from pathlib import Path
 workdir = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace/repo")
@@ -381,13 +381,13 @@ if not diff_applied:
     # Jump to Step 5 with outcome="FAILED", score=None.
 ```
 
-**Eval-head connection parameters** (the remote sella checkout serving the worker pool):
+**Eval-head connection parameters** (the remote eval checkout serving the worker pool):
 
 ```python
 EVAL_HOST       = "{{EVAL_HOST}}"        # injected by launch.py from $EVAL_HOST
 EVAL_REDIS_HOST = "{{EVAL_REDIS_HOST}}"  # injected by launch.py from $EVAL_REDIS_HOST
 EVAL_REDIS_PORT = {{EVAL_REDIS_PORT}}    # injected by launch.py from $REDIS_PORT
-SELLA_CHECKOUT  = "{{SELLA_CHECKOUT}}"   # injected by launch.py from $SELLA_CHECKOUT
+EVAL_CHECKOUT   = "{{EVAL_CHECKOUT}}"    # injected by launch.py from $EVAL_CHECKOUT
 EVAL_PYTHON     = "{{EVAL_PYTHON}}"      # injected by launch.py from $EVAL_PYTHON
 ```
 
@@ -431,7 +431,7 @@ subprocess.run(["scp", str(rep / "algo.py"), f"{EVAL_HOST}:{remote_cand}"],
 # 2. Run the deterministic eval on the eval head; it prints the score dict as
 #    a single JSON line on stdout (last line). BLOCK until it returns.
 eval_cmd = (
-    f"cd {SELLA_CHECKOUT} && {EVAL_PYTHON} eval_candidate.py "
+    f"cd {EVAL_CHECKOUT} && {EVAL_PYTHON} eval_candidate.py "
     f"--program {remote_cand} --redis-host {EVAL_REDIS_HOST} --redis-port {EVAL_REDIS_PORT}"
 )
 result = subprocess.run(
@@ -754,7 +754,7 @@ timestamp: {datetime.now(timezone.utc).isoformat()}
 ## Reproduction
 
 1. Copy `{FOCUS_ROOT}/champion/algo.py`
-2. scp it to the eval head and run from the sella checkout:
+2. scp it to the eval head and run from the eval checkout:
    `python eval_candidate.py --program <remote algo.py> --redis-host <redis-host> --redis-port <redis-port>`
 3. Expected: {metric_name} = {champion_metric} (deterministic — exact match every run)
 

@@ -40,7 +40,7 @@ From the repo root, in a separate shell:
 
 ```bash
 codex exec --dangerously-bypass-approvals-and-sandbox -C "$PWD" \
-  "Read runbook.md and execute. Task: task-sella. Run name: sella_v1. Use Codex multi_agent_v1 subagents for all agent launches."
+  "Read runbook.md and execute. Task: task-sella. Run name: <run-name>. Use Codex multi_agent_v1 subagents for all agent launches."
 ```
 
 Each launch materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, and logs; the template itself stays clean across runs. Hardware requirements vary per task — see each `task-<name>/README.md`.

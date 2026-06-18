@@ -22,10 +22,10 @@ python3 launch.py <run-name> --task task-sella
 `launch.py` walks up from `--task` looking for the nearest `LAUNCH.md` and copies it into the run
 directory as `task-profile.md`. For this task that resolves to `task-sella/LAUNCH.md` (this file).
 
-The candidate file `algo.py` and the evaluator (`eval_candidate.py`, `validate.py`, `molecules/`,
-`metrics.yaml`) live in the **sella checkout on the eval-head host** — there is no upstream clone
-step. The cpu-eval agents `scp` each candidate `algo.py` to the eval head and run
-`eval_candidate.py` there; they do not need a local training repo.
+The candidate file `algo.py` is local to the AS run. The evaluator (`eval_candidate.py`,
+`validate.py`, `molecules/`, `metrics.yaml`) lives in the configured eval checkout on the eval-head
+host. The cpu-eval agents `scp` each candidate `algo.py` to the eval head and run
+`eval_candidate.py` there; they do not need a local evaluator checkout.
 
 ---
 
@@ -51,7 +51,7 @@ proceeding to seeding. Do not let it grow to 9+ posts; that delays the first can
 
 | Window | Activity |
 |---|---|
-| 0–3 min | Read TASK.md, form roster (3 teams of ~3 agents) |
+| 0–3 min | Discussion agents read TASK.md; the alphabetically-last analyst forms the roster |
 | 3–5 min | Each team posts **1** seed proposal (not 3) — see `seeding_policy` |
 | 5–7 min | **First cpu-eval agent dispatched** to the highest-priority seed proposal |
 | 7–25 min | Parallel: evaluations continue; analysts post more proposals; discussion threads grow |
@@ -106,9 +106,8 @@ init & update, line search / step acceptance, convergence criterion) — not fin
 constant. Each `description` should name the mechanism being changed; the optimized metric is
 `fitness` (`mean_rel_steps`), lower is better, subject to the per-molecule energy gate.
 
-**`extra_monitor_instructions`:** cold-start monitor resolves roster formation after the first
-bounded discussion round. It creates three hypothesis-based team workspaces and writes
-`teams/roster.md`; it does not run experiments or write results.
+**`extra_monitor_instructions`:** audit-only. The monitor does not form cold-start teams or write
+`teams/roster.md`; analyst bootstrap via `ROLE-ANALYST.md` Step 0.25 owns roster creation.
 
 ---
 

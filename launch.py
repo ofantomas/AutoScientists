@@ -94,10 +94,15 @@ def _load_eval_config():
         "EVAL_HOST": "ssh target that runs eval_candidate.py",
         "EVAL_REDIS_HOST": "Redis host as seen from the eval head",
         "REDIS_PORT": "Redis port as seen from the eval head",
-        "SELLA_CHECKOUT": "opt_problem checkout path on the eval head",
+        "EVAL_CHECKOUT": "task evaluator checkout path on the eval head",
         "EVAL_PYTHON": "Python executable from the eval-head gigaopt environment",
     }
-    missing = [f"{name} ({desc})" for name, desc in required.items() if not os.environ.get(name)]
+    eval_checkout = os.environ.get("EVAL_CHECKOUT") or os.environ.get("SELLA_CHECKOUT")
+    missing = [
+        f"{name} ({desc})"
+        for name, desc in required.items()
+        if not (eval_checkout if name == "EVAL_CHECKOUT" else os.environ.get(name))
+    ]
     if missing:
         print("ERROR: missing eval-head deployment parameters:")
         for item in missing:
@@ -116,7 +121,7 @@ def _load_eval_config():
         "EVAL_HOST": os.environ["EVAL_HOST"],
         "EVAL_REDIS_HOST": os.environ["EVAL_REDIS_HOST"],
         "EVAL_REDIS_PORT": redis_port,
-        "SELLA_CHECKOUT": os.environ["SELLA_CHECKOUT"],
+        "EVAL_CHECKOUT": eval_checkout,
         "EVAL_PYTHON": os.environ["EVAL_PYTHON"],
     }
 
@@ -411,8 +416,8 @@ if (TEMPLATE_DIR / ".key").exists():
 # Two cases, determined by what's in the task source directory:
 #
 #   1. Task-bundled repo (task dir has its own repo/ and champion/) — copy
-#      those. This is the path the bundled task-sella takes: it ships
-#      repo/algo.py (the editable baseline) and champion/ (the seed champion).
+#      those. This path ships repo/algo.py (the editable baseline) and
+#      champion/ (the seed champion).
 #   2. Fallback: no bundled repo/ — agents work from a template repo/ if one
 #      exists, otherwise from scratch.
 #
@@ -664,8 +669,8 @@ last_fitness: null
             task_repos = list(TASK_DIR.glob("repo-*"))
             if task_repos:
                 repo_source = task_repos[0]
-            # Pattern 3: Sella CPU-eval - a plain task/repo/ directory shipped with the
-            # task (algo.py-centric; champion ships alongside). The eval head holds the
+            # Pattern 3: task-bundled CPU-eval - a plain task/repo/ directory
+            # shipped with the task (algo.py-centric; champion ships alongside). The eval head holds the
             # evaluator, so all we need locally is the editable algo.py baseline.
             elif (TASK_DIR / "repo").exists():
                 repo_source = TASK_DIR / "repo"

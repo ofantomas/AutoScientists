@@ -1,4 +1,4 @@
-# Launching AutoScientists on the gigaopt (sella) task — from scratch
+# Launching AutoScientists on a gigaopt eval task — from scratch
 
 This guide takes a **new operator** from nothing to a running AutoScientists (AS) optimization of the
 molecular-geometry optimizer (`algo.py`), end to end: the ClawInstitute coordination server, the xTB
@@ -26,7 +26,7 @@ network in exactly two ways: the orchestrator launches Codex subagents, and the 
  │  codex   ── orchestrator (runbook.md)  │  scp algo  │  redis-server  (eval queue)                │
  │    │  spawns Codex subagents:          │ ─────────▶ │  distributed_validate workers (consume)    │
  │    ├─ 1 monitor                        │            │  eval_candidate.py  (producer, per call)   │
- │    ├─ 6 cpu-eval  ───────────────────────────────▶ │  opt_problem sella checkout + molecules/   │
+ │    ├─ 6 cpu-eval  ───────────────────────────────▶ │  eval checkout + molecules/                │
  │    └─ 3 analysts                       │            └──────────────────────────────────────────┘
  │                                        │                         ▲   (optional) reverse SSH tunnels
  │  ClawInstitute server (port 3000)      │                         │
@@ -66,7 +66,7 @@ EVAL_HOST=<eval-head-host>        # ssh target that runs Redis + workers + eval_
                                   #   (may be the same as COORD_HOST)
 EVAL_REDIS_HOST=<redis-host>      # Redis host as seen from commands running on EVAL_HOST
 REDIS_PORT=<eval-redis-port>      # port of the eval Redis on EVAL_HOST
-SELLA_CHECKOUT=<path-on-eval>     # opt_problem sella checkout on EVAL_HOST (eval_candidate.py at root)
+EVAL_CHECKOUT=<path-on-eval>      # task evaluator checkout on EVAL_HOST (eval_candidate.py at root)
 EVAL_PYTHON=<python-on-eval>      # python from the gigaopt env on EVAL_HOST
 
 # --- Pool size (your call — size to host cores and how fast you want evals) ---
@@ -76,7 +76,7 @@ WORKER_HOSTS="<host> <host> ..."  # OPTIONAL extra worker hosts besides EVAL_HOS
 ```
 
 > **These values become the agents' eval contract.** `launch.py` reads `EVAL_HOST`,
-> `EVAL_REDIS_HOST`, `REDIS_PORT`, `SELLA_CHECKOUT`, and `EVAL_PYTHON` from the coordinator shell and
+> `EVAL_REDIS_HOST`, `REDIS_PORT`, `EVAL_CHECKOUT`, and `EVAL_PYTHON` from the coordinator shell and
 > injects them into every CPU-eval agent's generated `HEARTBEAT.md`. If any are missing, launch
 > aborts before creating a run directory.
 
@@ -109,7 +109,7 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
 - The `gigaopt` conda env (built from `opt_problem/environment.yml`; brings `xtb`, `ase`, `jax`,
   `numpy`, `scipy`, `redis`-server, `cloudpickle`). **`JAX_ENABLE_X64=1` is mandatory** — the workers
   set it; it changes the numerics.
-- An `opt_problem` checkout for the sella eval at `$SELLA_CHECKOUT`.
+- A task evaluator checkout at `$EVAL_CHECKOUT`.
 - `ssh` reachability **from each extra worker host to the eval head** (passwordless), and **from the
   coordinator to the eval head**.
 
@@ -160,7 +160,7 @@ Run on `$EVAL_HOST`. Three things must be live **before** any candidate can be s
 # 0. Activate the env (build it first if missing — see Part C / the setup-xtb-worker-host skill)
 source <conda>/etc/profile.d/conda.sh
 conda activate gigaopt
-cd "$SELLA_CHECKOUT"                    # eval_candidate.py is at its root
+cd "$EVAL_CHECKOUT"                     # eval_candidate.py is at its root
 ```
 
 **B1. Deploy the branch-matching `eval_candidate.py`.** The copy that actually runs lives in the
@@ -169,7 +169,7 @@ the coordinator, after `git switch <branch>` in the template, copy the version f
 are launching:
 
 ```bash
-scp autoscientists/task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"
+scp autoscientists/task-sella/eval_candidate.py "$EVAL_HOST:$EVAL_CHECKOUT/eval_candidate.py"
 ```
 
 > **Branch matters:** branches differ in whether `eval_candidate.py` emits a full `per_molecule`
@@ -196,7 +196,7 @@ For a pool **on the eval head itself** (local Redis), set `<redis_host>=localhos
 #                              [mode] [poll] [verbose] [log_dir] [python] [xtb_threads] \
 #                              [max_tasks] [task_timeout_s] [max_task_rss_gb]
 tmux new-session -d -s gigaevo_validate_workers \
-  "cd '$SELLA_CHECKOUT' && source <conda>/etc/profile.d/conda.sh && conda activate gigaopt && \
+  "cd '$EVAL_CHECKOUT' && source <conda>/etc/profile.d/conda.sh && conda activate gigaopt && \
    scripts/babysit_validate.sh localhost $REDIS_PORT $REDIS_PORT $NUM_WORKERS xtb 1.0 false \
      logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
 ```
@@ -378,8 +378,8 @@ cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requi
 codex exec --dangerously-bypass-approvals-and-sandbox -C "$PWD" \
   "Read runbook.md and execute. Task: task-sella. Run name: <run-name>. Use Codex multi_agent_v1 subagents for all agent launches."
 
-# EVAL HEAD ($EVAL_HOST) — env active, in $SELLA_CHECKOUT
-scp <coord>:.../task-sella/eval_candidate.py "$SELLA_CHECKOUT/eval_candidate.py"     # branch-matching
+# EVAL HEAD ($EVAL_HOST) — env active, in $EVAL_CHECKOUT
+scp <coord>:.../task-sella/eval_candidate.py "$EVAL_CHECKOUT/eval_candidate.py"      # branch-matching
 scripts/start_redis.sh "$REDIS_PORT"
 tmux new -d -s gigaevo_validate_workers \
   "scripts/babysit_validate.sh localhost $REDIS_PORT $REDIS_PORT $NUM_WORKERS xtb 1.0 false logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"

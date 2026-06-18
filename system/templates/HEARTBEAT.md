@@ -435,7 +435,7 @@ You have no queue to claim from, no team workspace to write to, no team to tag r
 ```python
 print(f"[EXIT] {AGENT_NAME}: no team assignment "
       f"(roster has {len(roster)} teams: {list(roster.keys())}). "
-      f"Waiting for monitor to form teams. No work performed.")
+      f"Waiting for analyst bootstrap/team reform. No work performed.")
 import sys; sys.exit(0)
 ```
 
