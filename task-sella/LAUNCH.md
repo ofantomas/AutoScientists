@@ -2,8 +2,8 @@
 
 This profile fills in the hooks from `runbook.md` for **open-ended optimization** of a compact
 molecular-geometry optimizer (`task_type: optimization`) — the goal is to drive `fitness`
-(`mean_rel_steps`, lower is better) down indefinitely, subject to a hard per-molecule energy
-validity gate. There is no wall-clock deadline; the loop runs until user interrupt.
+(`mean_rel_steps`, lower is better) down indefinitely, subject to a hard energy validity gate
+(`mean_rel_energy >= 1.0`). There is no wall-clock deadline; the loop runs until user interrupt.
 
 **Key shape:** CPU-only deterministic evaluation. Candidates (`algo.py`) are scored by a remote
 Redis-backed distributed validation worker pool — bounded by the worker count, NOT by any GPU
@@ -102,9 +102,11 @@ pending:
 ```
 
 Seed experiments propose **structural** changes to `algo.py` (step control / trust region, Hessian
-init & update, line search / step acceptance, convergence criterion) — not fine retuning of a single
-constant. Each `description` should name the mechanism being changed; the optimized metric is
-`fitness` (`mean_rel_steps`), lower is better, subject to the per-molecule energy gate.
+init & update, line search / step acceptance, internal-coordinate construction, restart/re-blend) — not
+fine retuning of a single constant, and **never** the convergence test (it is fixed and external; do not
+propose changing or gaming it — see TASK.md "What counts as cheating"). Each `description` should name
+the mechanism being changed; the optimized metric is `fitness` (`mean_rel_steps`), lower is better,
+subject to the validity gate `mean_rel_energy >= 1.0`.
 
 **`extra_monitor_instructions`:** none — monitor forms teams using its default heartbeat behavior.
 
@@ -254,14 +256,15 @@ def stagnation_response(cycle_count):
     print(f"STAGNATION: 0 KEEPs in last 10 experiments (cycle {cycle_count})")
     print("Open-ended task — triggering a discussion/regroup round, NOT stopping.")
     # Trigger a regroup: post a [DISCUSSION] inviting analysts to mine new structural axes
-    # (step control, curvature model, line search, convergence criterion), re-form teams,
-    # and seed fresh proposals. Then continue the loop normally.
+    # (step control, curvature model, line search, internal-coordinate construction, restart/re-blend),
+    # re-form teams, and seed fresh proposals. Then continue the loop normally.
     requests.post(f"{API}/posts", headers=HEADERS, json={
         "workshop": WORKSHOP,
         "title": f"[DISCUSSION] Stagnation regroup (cycle {cycle_count})",
         "content": ("0 KEEPs in the last 10 experiments. Re-form teams and propose NEW structural "
                     "axes for algo.py (step control / trust region, Hessian init & update, "
-                    "line search / step acceptance, convergence criterion). Avoid retuning a single "
+                    "line search / step acceptance, internal-coordinate construction, restart/re-blend). "
+                    "Do NOT touch or game the convergence test (fixed/external). Avoid retuning a single "
                     "constant. Seed fresh [PROPOSAL]s into the team queues."),
         "tags": ["type:discussion", "regroup"],
     })

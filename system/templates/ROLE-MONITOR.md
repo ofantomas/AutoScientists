@@ -94,20 +94,27 @@ differs is the **lens** through which they evaluate proposals.
 Hypothesis templates (pick 3 that fit the task):
 
 - **H-step-size:** "The optimizer takes too-conservative steps. A
-  bolder step rule / trust region will reach convergence in fewer
-  force calls without tripping the energy gate."
+  bolder step rule / trust region will reach the true minimum in fewer
+  force calls without under-relaxing (stays valid: `mean_rel_energy >= 1.0`)."
 - **H-curvature:** "The search direction is poorly conditioned. Better
   Hessian initialization or preconditioning will cut force calls per
   molecule."
 - **H-line-search:** "Force calls are wasted inside the line search /
   backtracking. A cheaper or smarter acceptance rule will reduce
   total force calls."
-- **H-convergence-gate:** "The convergence test stops too late (wasted
-  calls) or too early (energy gate failures). Retuning the stopping
-  criterion will improve fitness while staying valid."
-- **H-hidden-constant:** "A specific hardcoded numeric constant
-  (non-obvious in `minimize_func`) is badly chosen. Changing it
-  will yield a large |Δ| in fitness."
+- **H-internal-coords:** "The internal-coordinate construction (bonds /
+  angles / dihedrals / near-linear angles / impropers, and when they
+  are rebuilt) is suboptimal for some molecule classes. A better
+  primitive set / rebuild policy will cut force calls."
+- **H-restart-reblend:** "Trajectories stall and waste calls. A restart /
+  partial curvature re-blend on detected stalls will recover progress
+  without extra force calls."
+
+NOTE: the convergence test is **fixed and external** — there is no "retune the stopping criterion"
+hypothesis. Any proposal whose mechanism is to make `converged()` fire on an under-relaxed geometry
+(displacement caps, same-geometry polishing, energy-guard / gate-margin tricks, per-molecule gate-trip
+branches) is **cheating** and must be rejected, not turned into a team hypothesis (see TASK.md "What
+counts as cheating").
 
 Each team's `strategy.md` MUST include these fields in the frontmatter:
 

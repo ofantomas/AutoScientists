@@ -469,10 +469,10 @@ The score dict is the authoritative result. Its keys (emitted by `eval_candidate
 | Key | Meaning |
 |---|---|
 | `fitness` | **Primary, lower is better.** `= mean_rel_steps` when valid; `= 1000.0` when invalid. |
-| `is_valid` | `1` iff no errors AND `max_final_energy_delta_kcal_mol < 1.0`; else `0`. |
+| `is_valid` | `1` iff no errors, every molecule converged within budget, AND `mean_rel_energy >= 1.0`; else `0`. |
 | `mean_rel_steps` | Mean relative force-call count vs reference. |
-| `mean_rel_energy` | Diagnostic only — does NOT gate validity. |
-| `max_final_energy_delta_kcal_mol` | Worst per-molecule final-energy gap; drives the validity gate. |
+| `mean_rel_energy` | **Validity gate: valid only if `>= 1.0`** (relax at least as deep as reference on average). |
+| `max_final_energy_delta_kcal_mol` | Worst per-molecule final-energy gap; diagnostic only — does NOT gate validity. |
 | `converged` | Fraction of molecules whose convergence check passed. |
 | `invalid_reason` | Human string when invalid; empty when valid. |
 | `duration_s`, `num_results`, `num_errors`, `lower_is_better` | Diagnostics. |
@@ -506,15 +506,17 @@ This takes a few seconds and explains WHY a candidate passed or failed, not just
 Check these from the score dict:
 
 1. **Validity first.** If `is_valid == 0`, the candidate is rejected regardless of `fitness`. Read
-   `invalid_reason` and `max_final_energy_delta_kcal_mol`: a value `>= 1.0` means some molecule's
-   final energy drifted outside the 1 kcal/mol band (the optimizer stopped too early / converged to a
-   worse minimum). `num_errors > 0` with reasons like `"exceeded max force-call budget"` means the
-   optimizer blew past `max_steps` on at least one molecule. Note which failure mode in the result
-   file — it tells analysts whether to loosen step-aggressiveness or tighten the convergence test.
+   `invalid_reason` and `mean_rel_energy`: a value `< 1.0` means the optimizer recovered less energy
+   than the reference on average — it is **under-relaxing** (stopping too early / converging to a worse
+   minimum). `num_errors > 0` with reasons like `"exceeded max force-call budget"` means the optimizer
+   blew past `max_steps` on at least one molecule. Note which failure mode in the result file. The fix
+   is always a better *trajectory* (genuinely relax further in fewer calls) — **never** loosening,
+   targeting, or working around the convergence test, which is fixed and external.
 
-2. **Energy headroom.** Even when valid, record `max_final_energy_delta_kcal_mol`. A value close to
-   `1.0` means the candidate is near the validity cliff — further step reductions risk tipping it
-   invalid. A comfortably-low value means there is room to trade accuracy for fewer steps.
+2. **Energy margin.** Even when valid, record `mean_rel_energy`. A value at or just above `1.0` means
+   the candidate is near the validity boundary — further step reductions risk tipping it invalid by
+   under-relaxing. A comfortably-high value means the geometry is solidly relaxed. (Do not engineer a
+   result to sit *just* above 1.0 — that is gate-margin gaming; see "What counts as cheating" in TASK.md.)
 
 3. **Speed and coverage.** Record `mean_rel_steps` (= `fitness` when valid) and `converged` (fraction
    of molecules whose convergence check passed). A low `mean_rel_steps` with `converged == 1.0` and

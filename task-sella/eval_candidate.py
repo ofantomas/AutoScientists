@@ -26,7 +26,8 @@ from distributed_validate.optimizer import normalize_optimizer_spec
 
 def per_molecule_summary(results: list[dict]) -> dict:
     """Compact per-molecule view for analyst targeting. Eval is deterministic, so
-    these numbers reproduce exactly. Energy validity gate = 1.0 kcal/mol."""
+    these numbers reproduce exactly. Validity gate = mean_rel_energy >= 1.0; the most
+    under-relaxed molecules (largest positive energy_delta) are the validity risk."""
     rows = [{
         "mol": r.get("mol_name"),
         "rel_steps": round(float(r.get("rel_steps", 0.0)), 4),
@@ -39,7 +40,7 @@ def per_molecule_summary(results: list[dict]) -> dict:
     return {
         "n_molecules": len(rows),
         "worst_by_rel_steps": by_steps[:8],   # where the step budget is spent
-        "nearest_energy_gate": by_gate[:5],   # validity risk (gate at 1.0 kcal/mol)
+        "nearest_energy_gate": by_gate[:5],   # validity risk: most under-relaxed (gate = mean_rel_energy >= 1.0)
         "non_converged": [r["mol"] for r in rows if not r["converged"]],
     }
 
