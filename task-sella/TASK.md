@@ -68,6 +68,15 @@ timing); internal-coordinate **construction** (bonds/angles/dihedrals/near-linea
 rebuild policy); geometry **realization** (predictor/corrector, partial step, line search); and
 **restart/re-blend** of the curvature model on a stalled trajectory.
 
+**Pursue genuinely novel optimizer mechanisms** — the largest, most generalizable gains come from ideas
+not yet tried here, not from re-tuning constants. Take inspiration broadly and translate the underlying
+principle into a concrete change to `algo.py`: the optimization of ML models / neural networks / LLMs
+(momentum and Nesterov acceleration, adaptive-step and learning-rate-schedule ideas, preconditioning,
+second-order / natural-gradient / quasi-Newton variants, variance reduction, warm restarts), and
+optimization methods from other parts of physics and chemistry (relaxation and annealing schemes,
+basin-hopping, multigrid, continuation/homotopy, RFO and other geometry-optimization advances). A
+well-motivated novel mechanism beats another constant sweep.
+
 ## The convergence test (fixed and external — don't try to change it)
 `converged(...)` is passed into `minimize_func`. It is the SHARED, FIXED stopping rule used to score
 **every** algorithm identically — it lives outside `algo.py` on purpose, so different optimizers are
@@ -82,10 +91,8 @@ the slowest molecules — so each one genuinely enters this stationary band in a
 possible. Do **not** try to make `converged()` fire while the geometry is still under-relaxed (see "What
 counts as cheating").
 
-## Per-molecule analysis: for hypotheses, not memorization
+## Per-molecule analysis: for hypotheses
 The per-molecule table (`logs/run_log.md`) and `task/molecule_smiles.tsv` are advisory aids for finding
 the *structural* reason a class of molecules is slow (size, flexible rings, heavy atoms, bonding motifs)
-so you can fix the underlying mechanism and have it **generalize**. Do **not** turn per-molecule analysis
-into hard-coded per-molecule or per-formula branches: the molecule set is fixed, so such gates overfit it
-and are a form of cheating. A good mechanism is one you'd expect to help on *unseen* drug-like molecules,
-not just these.
+so you can fix the underlying mechanism and have it **generalize**. A good mechanism is one you'd expect
+to help on *unseen* drug-like molecules, not just these.
