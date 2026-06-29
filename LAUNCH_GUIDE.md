@@ -104,9 +104,10 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
 
 **On the coordinator (`$COORD_HOST`):**
 - [Node.js 22+](https://nodejs.org/) (ships `npx`) — for the ClawInstitute server.
-- The [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`), logged in. If `claude -p`
-  reports "Not logged in", run `claude setup-token` once (a desktop OAuth session is **not**
-  inherited by spawned `claude -p`).
+- The [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`), logged in — the recommended
+  **interactive** session (Part D) uses your desktop login directly. (Only relevant if you ever fall
+  back to a headless `claude -p`: a desktop OAuth session is **not** inherited by a spawned `-p`, so run
+  `claude setup-token` once.)
 - Python 3.9+ with `pip install -r requirements.txt` (just `requests`, `pyyaml`).
 - This `autoscientists/` repo, checked out on the branch you want to run.
 
@@ -265,12 +266,30 @@ ssh <host> 'tail -n 20 <opt_problem-checkout>/logs_validate/*.log'   # no repeat
 ## Part D — Launch the run
 
 Back on the **coordinator**, from the template dir on the desired branch, with ClawInstitute running
-(Part A) and the eval pool live (Part B). One command starts everything:
+(Part A) and the eval pool live (Part B).
+
+**Run the orchestrator as a single, long-lived, *interactive* Claude Code session that you keep open
+and watch** — this is the upstream contract (`launch.py`: *"open `runbook.md` in a Claude Code session
+and follow it"*). Start the TUI, then give it **one** prompt:
 
 ```bash
 cd <your-checkout>/autoscientists
-claude -p "Read runbook.md and execute. Task: task-sella. Run name: <run-name>"
+claude --dangerously-skip-permissions          # ONE interactive session you keep open + watch
+#  then type one prompt into it:
+#    Read runbook.md and execute. Task: task-sella. Run name: <run-name>.
 ```
+
+It loops open-ended until you `Ctrl+C`. **When the session ends or dies, continue it with
+`claude --resume`** (pick that session) — this preserves the **full conversation context**, so the
+orchestrator never loses the champion / cycle state.
+
+> ⚠️ **Do NOT wrap a headless `claude -p` in an auto-restart loop.** A `-p` shot starts a **fresh, empty
+> context** on every restart; the upstream resume (Step 0 "Resume after interruption") is prose-only with
+> a **non-persisted `cycle_count`**, so after many restarts a fresh-context session can mis-judge the
+> state and **reseed the search from baseline**. This happened in `sella_nocheat_r1` (the champion *data*
+> was protected by the pre-PUT fitness gate, but ~hours of compute were wasted re-exploring from
+> baseline). Interactive + `--resume` avoids it entirely. The biggest, longest-lived sessions are
+> `codex exec` (if codex is available) or a watched interactive `claude` — never a headless restart loop.
 
 What happens:
 
@@ -336,7 +355,7 @@ A healthy run shows `experiments.jsonl` growing, occasional `KEEP` outcomes lowe
 ## Part F — Stop & clean up
 
 ```bash
-# 1. Stop the orchestrator: Ctrl+C in the `claude -p` shell (open-ended; only you stop it).
+# 1. Stop the orchestrator: Ctrl+C in the interactive `claude` session (open-ended; only you stop it).
 
 # 2. Stop the eval pool (eval head + every worker host). Ctrl+C the babysitter, or:
 ssh "$EVAL_HOST" 'tmux kill-session -t gigaevo_validate_workers'
@@ -365,7 +384,7 @@ cleanup between runs except the Redis queue.
 | `run_log.md` empty / no per-molecule | Eval head running an aggregate-only `eval_candidate.py` → redeploy the per-molecule branch's copy (B1). |
 | Babysitter: "Found existing SSH tunnel … use another local port" | Local tunnel port already in use → pass a different `<local_redis_port>`. |
 | Remote worker can't reach the eval head by name | Pass the **real hostname**; if name resolution fails on that host, use the eval head's **IP**. |
-| Whole loop dies silently after a long session | Wrap the launch in an auto-restart loop; it resumes from the run dir + ClawInstitute state. |
+| Whole loop dies silently after a long session | Continue the **same** interactive session with `claude --resume` (preserves full context). Do **not** wrap a headless `claude -p` in an auto-restart loop — a fresh `-p` context + non-persisted `cycle_count` can reseed the search from baseline (see the Part D warning). |
 
 ---
 
@@ -378,7 +397,10 @@ Set the [Deployment parameters](#deployment-parameters-set-these-first) first, t
 npx clawinstitute start                                  # coordination server :3000
 export CLAWINSTITUTE_TOKEN=<token>
 cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requirements.txt
-claude -p "Read runbook.md and execute. Task: task-sella. Run name: <run-name>"
+claude --dangerously-skip-permissions        # ONE interactive session; type the prompt:
+#   Read runbook.md and execute. Task: task-sella. Run name: <run-name>.
+# resume after it dies (keeps context — never a headless -p restart loop):
+claude --resume
 
 # EVAL HEAD ($EVAL_HOST) — env active, in $SELLA_CHECKOUT
 scp <coord>:.../task-sella/eval_candidate.py "$SELLA_CHECKOUT/eval_candidate.py"     # branch-matching
