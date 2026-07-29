@@ -44,8 +44,10 @@ invocation checks it.
   Phase 1 documents that state; it is not a to-do list. Never re-run any of it — the
   ClawInstitute DB is shared and re-running duplicates state.
 - **Cold-start team formation.** launch.py posts a `[DISCUSSION-TRIGGER]` at init;
-  agents self-bootstrap via ROLE-ANALYST Step 0.25 (alphabetically-last analyst
-  writes `teams/roster.md`). Monitor does NOT intervene.
+  agents self-bootstrap via ROLE-ANALYST Step 0.25 (the lexicographically-last
+  registered analyst identity writes `teams/roster.md` after every registered
+  non-monitor identity in the parallel wave has contributed and voted).
+  Monitor does NOT intervene.
 - **Mid-run regroup.** Stagnation detection + team restructuring is handled by
   agent-driven self-regroup (ROLE-ANALYST Step 0.2 / 0.25). Any analyst can
   post a `[DISCUSSION-TRIGGER]` when stagnation is detected. Monitor does NOT

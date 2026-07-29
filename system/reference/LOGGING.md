@@ -66,8 +66,6 @@ Always write all 16 keys, using `null` for what could not be determined.
 ├── logs/
 │   ├── experiments.jsonl       ← CANONICAL (orchestrator writes)
 │   ├── sessions.jsonl          ← One line per agent session (orchestrator writes)
-│   └── raw/
-│       └── {agent}_{timestamp}_{nonce}.json  ← Native child completion artifact
 │
 ├── agents/{name}/
 │   └── actions.md              ← Human-readable session history per agent
@@ -87,65 +85,37 @@ These are all useful for context but `experiments.jsonl` is the one the stagnati
 ```json
 {
   "agent": "run01_cpu1",
-  "role": "cpu",
-  "team": "architecture",
-  "session_id": "uuid",
+  "cycle": 3,
+  "codex_target": "/root/run01_cpu1_cpu_cycle_3_a1b2c3d4e5f60718",
   "started_at": "2026-03-29T10:00:00Z",
   "ended_at": "2026-03-29T10:08:30Z",
-  "duration_seconds": 510,
-  "status": "success",
-  "promise_received": true,
-  "experiments_run": 2,
-  "experiments": [
-    {"exp_id": "exp_kv_shift", "metric": 0.985, "outcome": "KEEP", "delta": -0.005},
-    {"exp_id": "exp_gated_attn", "metric": 1.002, "outcome": "DISCARD", "delta": 0.012}
-  ],
-  "error": null
+  "terminal_status": "completed",
+  "promise_received": true
 }
 ```
 
-**Failed session:**
+The row deliberately stays compact. Experiment details live in `experiments.jsonl`; the full child
+transcript remains attached to the persisted parent Codex session.
+
+`terminal_status` is one of `completed`, `errored`, or `interrupted`. A bounded `wait_agent`
+timeout is only a polling wake-up and produces no row because the child is not terminal.
+`promise_received` is true only when `terminal_status == "completed"` and the returned message
+contains the branch-qualified completion promise.
+
+**Errored session:**
 ```json
 {
   "agent": "run01_cpu2",
-  "role": "cpu",
-  "team": "optimizer",
+  "cycle": 3,
+  "codex_target": "/root/run01_cpu2_cpu_cycle_3_b1c2d3e4f5a60718",
   "started_at": "2026-03-29T10:00:05Z",
   "ended_at": "2026-03-29T10:20:05Z",
-  "duration_seconds": 1200,
-  "status": "timeout",
-  "promise_received": false,
-  "experiments_run": 1,
-  "experiments": [
-    {"exp_id": "exp_muon_warmup", "metric": null, "outcome": null, "delta": null}
-  ],
-  "error": "Agent timed out after 1200s — training may have completed but result not written"
+  "terminal_status": "errored",
+  "promise_received": false
 }
 ```
 
-**Orchestrator writes this:**
-```python
-import json, uuid
-from datetime import datetime, timezone
-
-def log_session(agent, role, team, started, status, experiments, error=None):
-    entry = {
-        "agent": agent,
-        "role": role,
-        "team": team,
-        "session_id": str(uuid.uuid4()),
-        "started_at": started,
-        "ended_at": datetime.now(timezone.utc).isoformat(),
-        "duration_seconds": (datetime.now(timezone.utc) - parse(started)).total_seconds(),
-        "status": status,
-        "promise_received": status == "success",
-        "experiments_run": len(experiments),
-        "experiments": experiments,
-        "error": error
-    }
-    with open(f"{FOCUS_ROOT}/logs/sessions.jsonl", "a") as f:
-        f.write(json.dumps(entry) + "\n")
-```
+The exact writer and native-status normalization are defined once in runbook Step 5d.
 
 ## 2. experiments.jsonl — Experiment Tracking
 
@@ -218,29 +188,7 @@ These bind every consumer of the ledger — the queries below, runbook Step 5g, 
 5. **`NEAR_MISS` stays in the rate denominators** (it is a real experiment that cleared both gates)
    but is excluded from the *stagnation window*, per the paragraph above.
 
-## 3. Native cycle-child completion artifacts
-
-**Written by:** Orchestrator for each analyst or CPU-eval cycle child harvested in runbook Step 5d.
-**Location:** `{FOCUS_ROOT}/logs/raw/{agent}_{timestamp}_{nonce}.json`
-
-```json
-{
-  "agent": "run01_cpu1",
-  "cycle": 3,
-  "codex_target": "/root/run01_cpu1_cpu_cycle_3_a1b2c3d4e5f60718",
-  "codex_agent_id": null,
-  "codex_task_name": "run01_cpu1_cpu_cycle_3_a1b2c3d4e5f60718",
-  "terminal_status": "completed",
-  "promise_received": true,
-  "final_message": "<promise>run01_cpu1 cycle complete (branch=normal)</promise>",
-  "ended_at": "2026-07-29T12:00:00+00:00"
-}
-```
-
-This is the run-local handoff evidence available from a native Codex child, not a full stdout/tool
-transcript. The full child thread remains attached to the persisted parent Codex session.
-
-## 4. agents/{name}/actions.md — Per-Agent History
+## 3. agents/{name}/actions.md — Per-Agent History
 
 **Written by:** Each agent at the end of its session (Step 4 in HEARTBEAT.md).
 **Format:** Human-readable markdown, auto-truncated at 100 lines.
@@ -259,7 +207,7 @@ transcript. The full child thread remains attached to the persisted parent Codex
 ### Duration: 8m 30s
 ```
 
-## 5. Workspace Agent Files — Cross-Agent Visibility
+## 4. Workspace Agent Files — Cross-Agent Visibility
 
 **Written by:** Each agent via PATCH after session.
 **Read by:** Orchestrator + other agents to see who's active.
@@ -314,7 +262,7 @@ for team, s in stats.items():
 "
 ```
 
-### "How many sessions timed out?"
+### "How did native child sessions terminate?"
 ```bash
 cat logs/sessions.jsonl | python3 -c "
 import sys, json
@@ -322,9 +270,9 @@ from collections import Counter
 status = Counter()
 for line in sys.stdin:
     d = json.loads(line)
-    status[d['status']] += 1
+    status[(d['terminal_status'], d['promise_received'])] += 1
 for s, c in status.most_common():
-    print(f'{s}: {c}')
+    print(f'terminal_status={s[0]} promise_received={s[1]}: {c}')
 "
 ```
 
@@ -377,11 +325,4 @@ for line in sys.stdin:
 "
 ```
 
-## Directory Setup
-
-The orchestrator creates log directories before first launch:
-
-```python
-(FOCUS_ROOT / "logs" / "raw").mkdir(parents=True, exist_ok=True)
-# sessions.jsonl and experiments.jsonl are created on first write (append mode)
-```
+`sessions.jsonl` and `experiments.jsonl` are created on first write in append mode.

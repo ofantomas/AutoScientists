@@ -36,18 +36,31 @@ pip install -r requirements.txt
 From the repo root, in a separate shell:
 
 ```bash
+AS_RUN_NAME=sella_v1
+AS_ORCH_LOG_DIR="../${AS_RUN_NAME}_codex"
+mkdir -p "$AS_ORCH_LOG_DIR"
+
 CODEX_ENGINE_ARGS=(
   --dangerously-bypass-approvals-and-sandbox
   -m gpt-5.6-sol
   -c 'model_reasoning_effort="xhigh"'
+  --enable multi_agent
   -c 'agents.default_subagent_model="gpt-5.6-sol"'
   -c 'agents.default_subagent_reasoning_effort="xhigh"'
   -c agents.max_concurrent_threads_per_session=10
 )
 
-codex exec "${CODEX_ENGINE_ARGS[@]}" \
-  "Read runbook.md and execute continuously. Task: task-sella. Run name: sella_v1."
+nohup codex exec "${CODEX_ENGINE_ARGS[@]}" -C "$PWD" --json \
+  "Read runbook.md and execute continuously. Task: task-sella. Run name: ${AS_RUN_NAME}." \
+  >"$AS_ORCH_LOG_DIR/events.jsonl" \
+  2>"$AS_ORCH_LOG_DIR/stderr.log" </dev/null &
+echo $! >"$AS_ORCH_LOG_DIR/pid"
 ```
+
+This is a detached, non-interactive CLI run; it does not create a Codex Desktop
+task. The first `thread.started` event in `events.jsonl` contains the exact
+session ID. If the process dies, resume that ID manually with the same engine
+arguments and `--json`; do not start a new orchestrator session.
 
 Each launch materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, and logs; the template itself stays clean across runs. Hardware requirements vary per task — see each `task-<name>/README.md`.
 

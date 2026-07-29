@@ -44,24 +44,24 @@ is sufficient.
 
 ## Hook: discussion_policy
 
-**OPTIONAL on cold start.** Skip the standalone discussion phase if the user wants the fastest
-possible first eval dispatch. Instead, run it *in parallel* with the first cpu-eval agent's
-evaluation in Step 5.
-
-If you do run it standalone, cap discussion at ONE round of posts (3–8 minutes total) before
-proceeding to seeding. Do not let it grow to 9+ posts; that delays the first candidate evaluation.
+**Required on cold start.** Run one complete parallel formation wave. Every non-monitor peer
+contributes; within the same wave, the designated analyst waits for all registered contributions
+and votes before forming the roster. Do not add an extended second round before the baseline unless
+the operator explicitly asks for one. Step 4 requires this roster before Step 5, and CPU agents with
+an empty roster correctly route to discussion rather than evaluation.
 
 ### Cold-start fast path
 
-**Goal: first candidate dispatched to the eval pool within ~10 minutes of orchestrator start.**
+**Goal: shared baseline dispatched within ~15 minutes, followed by candidate
+evaluation in the next CPU wave.**
 
 | Window | Activity |
 |---|---|
-| 0–5 min | Read TASK.md, form roster (3 teams of ~3 agents) |
-| 5–10 min | Each team posts **at least 2** seed proposals (2 is the floor, not a target to beat) — see `seeding_policy` |
-| 10–15 min | **First cpu-eval agent dispatched** — shared baseline first; seeds become claimable as reviews land |
-| 15–40 min | Parallel: evaluations continue; analysts post more proposals; discussion threads grow |
-| 40–50 min | Harvest results, ledger the cycle, champion settles |
+| 0–15 min | Read TASK.md; complete the parallel discussion wave; form 2–3 viable teams, each with at least 2 CPU agents |
+| 15–20 min | Each team posts **at least 2** seed proposals (2 is the floor, not a target to beat) — see `seeding_policy` |
+| 20–25 min | **CPU wave dispatched** — exactly one baseline-lock winner runs the shared baseline; non-holders hand off and exit |
+| 25–50 min | Next wave evaluates reviewed seeds in parallel; analysts post more proposals; discussion threads grow |
+| 50–60 min | Harvest results, ledger the cycle, champion settles |
 
 These windows are **soft signals, not alarms.** Extended thinking is on by default, so every agent
 is slower than the numbers older runs were calibrated against, and a cpu-eval agent that scores a
@@ -70,19 +70,20 @@ winning cycle takes longer than a losing one by design. A cycle that runs long b
 healthy. Watch **two consecutive cycles** before concluding anything is wrong.
 
 Rules:
-1. Skip extended discussion before any evaluation.
+1. Run the single required formation wave, but skip additional extended discussion before the
+   shared baseline.
 2. Seed-queue minimum, not maximum — but the minimum is **two** proposals per team, not one: the
    seed count must exceed `REVIEW_CAP` (1 per agent per spawn) so review coverage distributes
    across the booting agents instead of concentrating in whichever one boots first.
-3. Dispatch the first cpu-eval agent the moment the first queue.md is written (it holds the team's
-   full seed set — the PUT is a single write, so it is never observed part-filled).
+3. Dispatch the first CPU wave as soon as seeded queues exist. Exactly one agent runs the shared
+   baseline; the baseline wait rule forbids every non-holder from starting a candidate against an
+   unset anchor.
 4. Eval concurrency is bounded by the remote distributed-validation worker pool, NOT by any device
    count. Multiple cpu-eval agents may dispatch concurrently; each candidate gets a unique remote
    path so they don't collide.
-5. Do NOT block on perfect discussion before evaluation starts.
+5. Do NOT block on perfect discussion beyond the required formation wave.
 
-**`extra_discussion_instructions` (empty if discussion is skipped):** no additions beyond the base
-prompt.
+**`extra_discussion_instructions`:** no additions beyond the base prompt.
 
 ---
 
@@ -90,8 +91,9 @@ prompt.
 
 **Orchestrator-seeded.** After teams are formed, the orchestrator itself posts **at least two**
 `[PROPOSAL]`s per team — one per seeded item — and writes them into the team's `queue.md` in a single
-PUT. Dispatch the first cpu-eval agent as soon as the first team's `queue.md` has been written — do
-not wait for all teams to be seeded.
+PUT. Seed every team queue before dispatch, then launch the complete first cpu-eval wave in
+parallel. The baseline lock determines which member evaluates `baseline_shared`; dispatch order
+does not.
 
 ### Three invariants this hook must not violate
 
@@ -163,9 +165,9 @@ An earlier version of this hook exempted seeds — they were written pre-cleared
 that at cold start nobody has run yet, so no review can exist and the first cycle would deadlock
 against the very agents waiting on the queue. **That rationale no longer holds.** Reviewing is now a
 *spawn-time* obligation: every non-monitor agent drains the review backlog before its own work, and
-cross-team review is allowed, so a seed posted by this hook is reviewable by the first agent of the
-first rotation whatever team it lands on. And the first cpu-eval agent of a cold start runs the
-**shared baseline**, which is not a queue item at all — it is never idled by an unreviewed queue.
+cross-team review is allowed, so a seed posted by this hook is reviewable during the first
+rotation whatever team it lands on. The baseline-lock winner runs the **shared baseline**, which is
+not a queue item at all — it is never idled by an unreviewed queue.
 
 Cold start is also where a review is worth the most. Seeds are written by the orchestrator from
 TASK.md alone with no evidence behind them; they are the least-vetted mechanisms of the entire run.
@@ -336,8 +338,9 @@ it is not ready to seed; post it as `[DISCUSSION]` and seed something that is.
 a mechanism, not an essay; long seeds delay the first dispatch and are not read more carefully.
 
 **`extra_monitor_instructions`:** none — the monitor runs its default heartbeat health pass. It does
-**not** form teams: `teams/roster.md` is written by the alphabetically-last analyst of the discussion
-round (HEARTBEAT § 2b3 → ROLE-ANALYST Step 0.25).
+**not** form teams: formation/reform writes to `teams/roster.md` belong to the
+lexicographically-last registered analyst identity (HEARTBEAT § 2b3 →
+ROLE-ANALYST Step 0.25); Step 1d.5 separately enacts endorsed merges.
 
 ---
 
@@ -378,12 +381,14 @@ eval_agents = sorted(a for a in os.listdir(f"{FOCUS_ROOT}/agents") if "_cpu" in 
 
 # Dispatch every cpu-eval agent in the roster each cycle (size set by launch.py --cpu).
 #
-# Cold start: as soon as teams form, immediately dispatch one cpu-eval agent in
-# MODE=execute to run the shared baseline, before extended discussion; then
-# dispatch the rest against the seeded queues.
+# Cold start: dispatch the full CPU wave. Exactly one agent wins the shared
+# baseline lock; every non-holder performs its normal handoff and exits without
+# touching candidate work. Candidate evaluations begin on the next CPU wave
+# after the baseline result or first valid champion has been published.
 
 cpu_children = {}
 for agent_name in eval_agents:
+    cycle_child_started_at[agent_name] = datetime.now(timezone.utc).isoformat()
     cpu_children[agent_name] = spawn_agent(
         task_name=codex_task_name(agent_name, "cpu_cycle", cycle_count),
         message=(

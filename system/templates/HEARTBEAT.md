@@ -99,14 +99,14 @@ intervention. Before executing a normal cycle, search the workshop for
 an unresolved `[DISCUSSION-TRIGGER]` post:
 
 ```python
-recent = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=30",
+recent = requests.get(f"{API}/posts?workshop={WORKSHOP}&limit=50",
                       headers=HEADERS).json().get("data", [])
 trigger_posts = [p for p in recent if "[DISCUSSION-TRIGGER]" in p.get("title", "")]
 
-# A trigger is "active" if:
-#   - it was posted within the last 3 rotations, AND
-#   - its purpose is not already served, AND
-#   - fewer than QUORUM [DISCUSS-DONE] comments exist on it
+# A trigger remains unresolved until the designated analyst publishes either
+# [TEAM-REFORMED] or [SYSTEM-EXHAUSTED] with that trigger id in the body.
+# Before quorum every non-monitor agent contributes; at/after quorum only the
+# designated analyst is routed so the agreed conclusion is enacted exactly once.
 #
 # QUORUM SCALES WITH THE ROSTER. launch.py sizes the roster (--cpu / --analysts), so a
 # hardcoded count silently becomes a supermajority on a small roster and deadlocks the run:
@@ -121,26 +121,44 @@ _non_monitor = [a for a in os.listdir(_agents_dir)
                 and "monitor" not in a]
 DISCUSS_QUORUM = max(2, math.ceil(len(_non_monitor) / 2))   # 9 -> 5, 6 -> 3, 4 -> 2
 
-# PURPOSE-SERVED SHORT-CIRCUIT: a cold-start trigger exists to produce a roster. Once teams
-# are committed (roster `phase: executing` / non-empty `teams`), the trigger has done its job
-# and must NOT keep re-routing execute-mode agents into discussion — otherwise the queues stay
-# full and no experiment ever runs, regardless of the vote tally.
 _roster = parse_frontmatter(requests.get(
     f"{API}/workspaces/{MAIN_WS_ID}/files/teams/roster.md", headers=HEADERS).json())
 _teams_committed = bool(_roster.get("teams")) or _roster.get("phase") == "executing"
+_analysts = sorted(a for a in _non_monitor if "_analyst" in a)
+_formation_owner = _analysts[-1] if _analysts else None
 
-if trigger_posts:
-    active_trigger = trigger_posts[0]  # most recent
+def trigger_is_resolved(trigger):
+    return any(
+        any(marker in p.get("title", "")
+            for marker in ("[TEAM-REFORMED]", "[SYSTEM-EXHAUSTED]"))
+        and trigger["id"] in (p.get("content", "") or "")
+        for p in recent
+    )
+
+# Posts arrive newest-first. If concurrent analysts created two triggers, work
+# through the newest unresolved one first; after it resolves, the next invocation
+# selects the older unresolved one. Never ignore an unresolved trigger merely
+# because a newer trigger is already resolved.
+unresolved_triggers = [p for p in trigger_posts if not trigger_is_resolved(p)]
+active_trigger = unresolved_triggers[0] if unresolved_triggers else None
+should_discuss = False
+if active_trigger:
     done_count = count_comments_matching(active_trigger["id"], "[DISCUSS-DONE]")
-    if done_count < DISCUSS_QUORUM and not _teams_committed:
+    should_discuss = (
+        not _teams_committed
+        or done_count < DISCUSS_QUORUM
+        or (MY_ROLE == "analyst" and AGENT_NAME == _formation_owner)
+    )
+    if should_discuss:
         # Switch THIS agent into discussion mode
-        print(f"[DISCUSSION-TRIGGER active] switching to Part 2")
+        print(f"[DISCUSSION-TRIGGER active] {done_count}/{DISCUSS_QUORUM} DONE; "
+              f"switching {AGENT_NAME} to Part 2")
         MODE = "discussion"
         branch_taken = "discussion"
         # fall through to Part 2
 ```
 
-If an active trigger exists → go to **Part 2 (Discussion Branch)**.
+If `should_discuss` is true → go to **Part 2 (Discussion Branch)**.
 Otherwise → continue to Check B.
 
 ### Check B: Do teams exist in the roster?
@@ -182,7 +200,7 @@ for name, t in roster.items():
         TEAM_WS_ID = t["workspace_id"]
 ```
 
-- **`roster` is empty (no teams formed yet)** → set `branch_taken = "discussion"` and go to **Part 2 (Discussion Branch)**. An empty roster means the system is in cold-start bootstrap: every agent should contribute dimension proposals / hypothesis candidates so the team roster can be committed. Do NOT exit idle — that wastes an agent-slot. The alphabetically-last analyst who runs during bootstrap writes the roster per Step 0.25 of ROLE-ANALYST.
+- **`roster` is empty (no teams formed yet)** → set `branch_taken = "discussion"` and go to **Part 2 (Discussion Branch)**. An empty roster means the system is in cold-start bootstrap: every agent should contribute dimension proposals / hypothesis candidates so the team roster can be committed. Do NOT exit idle — that wastes an agent-slot. The lexicographically-last registered analyst identity is the sole formation/reform writer per Step 0.25 of ROLE-ANALYST; Step 1d.5 separately enacts endorsed merges. The parent launches one parallel wave, and the formation owner waits for every registered non-monitor identity's contribution and vote.
 - **`roster` has teams but `MY_TEAM is None` (you are not on any team)** → set `branch_taken = "no-team"` and go to **Part 3 (No-Team Branch)**. Exit cleanly. (This case means teams exist but you were left out of the roster — a coordination bug; report it and exit rather than freelancing.)
 - **`MY_TEAM` is set** → continue to Check C.
 
@@ -283,7 +301,7 @@ first because it is the only one decided without asking about teams or discussio
 |---|---|---|---|---|---|---|
 | `monitor` | any (ignored) | any, empty included | always None (by design) | n/a | **Part 3.5** | Health pass ONCE — stale claims, outcome counts, queue depth, falsification counters — then exit. No queue claims, no experiments, no `teams/roster.md`, no `champion/` |
 | `cpu` | any | any | any | unposted, eval still alive | resume-waiting (Part 6 only) | Log, exit, don't claim new work |
-| `cpu` | any | any | any | unposted, eval finished or `status: failed` | Part 5 | Finish the held-out test gate if missing, decide KEEP/NEAR_MISS/DISCARD/REJECTED_TEST/FAILED, write `results/{exp_id}.md`, post [RESULT], promote on KEEP, re-queue as `{exp_id}_stack` on NEAR_MISS, re-queue on FAILED, mark posted |
+| `cpu` | any | any | any | unposted, eval finished or `status: failed` | Part 5 | Unless the shared baseline is still unresolved, finish the held-out test gate if missing, decide KEEP/NEAR_MISS/DISCARD/REJECTED_TEST/FAILED, write `results/{exp_id}.md`, post [RESULT], promote on KEEP, re-queue as `{exp_id}_stack` on NEAR_MISS, re-queue on FAILED, mark posted |
 | `cpu` / `analyst` | `discussion` | any | any | none | Part 2 | CPU-only thinking, read + respond + propose |
 | `cpu` / `analyst` | `execute` or unset | empty | — | none | Part 2 | Cold-start bootstrap: contribute to dimension discussion so a roster can be committed |
 | `cpu` / `analyst` | `execute` or unset | non-empty | None | none | Part 3 | Exit cleanly (you are not on any team — coordination bug) |
@@ -799,12 +817,14 @@ NOT run any experiments this cycle.** Discussion mode is for thinking,
 reading, debating, proposing, and building consensus — before or
 between experimental rounds.
 
-The orchestrator may run MULTIPLE discussion rounds before launching
-experiments. Each round, you read everything posted so far and
-contribute something NEW. The conversation evolves naturally across
-rounds: early rounds are brainstorming, later rounds become synthesis
-and ranking. You do not need a special MODE to shift from brainstorming
-to synthesis — just read what's there and do whatever is most valuable.
+At cold start the Sella profile launches one complete parallel wave. The
+designated analyst waits within that invocation for every registered non-monitor identity's
+contribution and vote; the empty roster then lets it form teams without waiting
+for the mid-run DONE quorum. A different profile may request multiple
+pre-experiment discussion rounds. Mid-run, repeated discussion invocations may
+also be needed to reach quorum. On every invocation, read what is already
+posted and contribute something new; later contributions should move from
+brainstorming toward synthesis and ranking.
 
 ### 2a. Read everything
 
@@ -896,10 +916,9 @@ Choose whichever of these is most valuable given what's already posted:
 
 ### 2b2. Discussion self-termination vote — REQUIRED
 
-Before exiting a discussion cycle, decide whether ONE more round of
-discussion is needed or whether the system should return to execution.
-Post exactly ONE of the following as a comment on the active
-`[DISCUSSION-TRIGGER]` thread:
+Before exiting your first invocation on an active trigger, decide whether one
+more round is needed or the system should return to execution. Each registered
+identity may contribute at most one `[DISCUSS-DONE]` to that trigger. Post:
 
 - **`[DISCUSS-MORE] your-reason`** — new axes still surfacing,
   disagreements not resolved, or your analysis added substantial new
@@ -909,11 +928,18 @@ Post exactly ONE of the following as a comment on the active
   little new content. The system exits discussion mode once
   `DISCUSS_QUORUM` agents post `[DISCUSS-DONE]`.
 
-This is a self-regulating termination signal. No orchestrator decides
-when to stop discussing — the agents do, by simple majority of the
-non-monitor roster (`DISCUSS_QUORUM`, computed in Part 0 Check A2 —
-never a hardcoded count, which becomes a supermajority on a small
-roster and deadlocks the round).
+If you previously posted `[DISCUSS-MORE]` and later converge, you may add your
+single `[DISCUSS-DONE]`; it supersedes your earlier MORE. If you already posted
+DONE, do not post another vote on a later invocation. Under the trusted-agent
+contract, the raw DONE count is therefore also a distinct-agent count.
+
+For mid-run reform this is a self-regulating termination signal: the agents
+decide by simple majority of the non-monitor roster (`DISCUSS_QUORUM`, computed
+in Part 0 Check A2 — never a hardcoded count, which becomes a supermajority on
+a small roster and deadlocks the round). Cold start is the explicit exception:
+the empty roster authorizes formation after every registered non-monitor
+identity in the parallel wave has contributed and voted, so the designated
+analyst does not wait for the mid-run quorum.
 
 ### 2b3. Analysts only: run the ROLE-ANALYST discussion-branch steps — REQUIRED
 
@@ -930,13 +956,20 @@ execute, in this order:
 4. **Step 0.25** — team formation / reform. Run this **after** you have posted
    your own `[DISCUSS-MORE]` / `[DISCUSS-DONE]` comment in 2b2, so your vote is
    counted. It is gated on `MODE=discussion` and on you being the
-   alphabetically-last analyst to have run this round; if you are not, it is a
-   no-op and the last one handles it.
+   lexicographically-last registered analyst identity; if you are not, it is a
+   no-op. This changes no other discussion obligation.
 
-**Step 0.25 is the ONLY writer of `teams/roster.md`.** If no analyst executes it
-on this branch, the roster is never written, and the run cannot leave cold start.
-Nothing else in the system — not the monitor, not the orchestrator — will do it
-for you. If you are an analyst and you skip this step, you have broken the run.
+**Step 0.25 is the ONLY discussion-branch formation/reform writer of
+`teams/roster.md`; ROLE-ANALYST Step 1d.5 separately enacts endorsed merges.**
+If no analyst executes Step 0.25 on this branch, the roster is never written and
+the run cannot leave cold start. Neither the monitor nor the orchestrator will
+do it for you. If you are the designated analyst and skip this step, you have
+broken the run.
+
+After Step 0.25 concludes a round, its `[TEAM-REFORMED]` or
+`[SYSTEM-EXHAUSTED]` post must include the active `[DISCUSSION-TRIGGER]` post id
+in the body. Check A2 uses that existing artifact—not a new state file—to stop
+routing agents into the resolved round.
 
 CPU-eval agents skip 2b3 entirely. (The monitor never reaches Part 2 at all — Part 0 Check A0 sends
 it to Part 3.5.)
@@ -1147,7 +1180,7 @@ Follow your role-specific protocol below (Part 4-Role) and team coordination pro
 ### 4e. Mandatory API trail
 
 Every experiment, proposal, or knowledge artifact you produce in this branch MUST be reflected in the AnonAPI API:
-- **CPU-eval agents**: claim from queue → train eval → held-out test eval (only on a provisional train keep) → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. Only on a KEEP that passed both gates: PUT `champion.md` (train `metric_value` + `test_metric_value`) and propagate `champion/algo.py` per ROLE-CPU Step 7b1. On NEAR_MISS (both gates passed, promotion race lost) touch neither champion file and re-queue the change as `{exp_id}_stack`. On REJECTED_TEST, record it in the team's `non_generalizable.md`.
+- **CPU-eval agents**: ordinary candidates follow claim from queue → train eval → held-out test eval (only on a provisional train keep) → write `results/{exp_id}.md` to main workspace → release claim → POST `[RESULT]` to workshop. The global `baseline_shared` infrastructure run has no team queue row or claim file. Only on a KEEP that passed both gates: PUT `champion.md` (train `metric_value` + `test_metric_value`) and propagate `champion/algo.py` per ROLE-CPU Step 7b1. On NEAR_MISS (both gates passed, promotion race lost) touch neither champion file and re-queue the change as `{exp_id}_stack`. On an ordinary candidate's REJECTED_TEST, record it in the team's `non_generalizable.md`.
 - **Analysts**: POST `[PROPOSAL]` to workshop → add the experiment to the team `queue.md` via **read-modify-PUT with If-Match** (NEVER PATCH — it flattens `pending:` across teams).
 
 If you cannot complete the API trail for an artifact, do not produce the artifact. Local-only work (writing only to `agents/{AGENT_NAME}/memory/`, mutating `champion/algo.py` without the trail) is FREELANCING and is forbidden.
@@ -1172,6 +1205,23 @@ If you cannot complete the API trail for an artifact, do not produce the artifac
 
 Finish a prior session's unposted result. Do NOT claim new work, do NOT edit `algo.py` — the candidate is frozen and must stay byte-identical across both splits. **If `MY_ROLE != "cpu"`, you should never have been routed here — skip Part 5 entirely and fall through to Part 6.** Only CPU-eval agents write `result_latest.json`; an analyst/monitor reaching this branch indicates a bug upstream, and the only safe action is to exit without doing anything.
 
+**Shared-baseline wait comes first.** If this sentinel is not
+`baseline_shared`, re-read `champion.md` before doing anything below. While it
+still says `awaiting_baseline`, also read `results/baseline_shared.md`:
+
+- **Only** a terminal scientific verdict file resolves the attempt without
+  creating a valid champion. Its parsed frontmatter must name
+  `exp_id: baseline_shared`, contain numeric `fitness`, contain `is_valid`, and
+  classify the outcome as exactly `DISCARD` or `REJECTED_TEST`; a
+  `REJECTED_TEST` must additionally contain numeric `test_metric_value` and
+  `test_is_valid`. Continue this branch under the existing
+  first-valid-candidate seeding rule.
+- For every other absent, partial, malformed, or differently classified result,
+  stop here. Preserve the sentinel and claim exactly as they are; do not run
+  TEST, classify, publish, release the claim, or edit the queue. Perform the
+  normal Part 6 handoff and exit. A fresh invocation will resume after the
+  baseline holder finishes.
+
 **Where your item is, and what proves it is yours.** The claim never removed anything from the
 queue: your item is still a row in `pending:`, and `pending:` remains the single source of truth for
 what work exists. Exclusion lives in a separate one-item file, `claims/{exp_id}.md` in the TEAM
@@ -1191,6 +1241,9 @@ Outcomes — FIVE values, same ladder as ROLE-CPU Steps 5/6/7:
 | **DISCARD** | invalid on train, or not better than the champion by `KEEP_MARGIN` | `dead_ends.md` | `completed:` |
 | **REJECTED_TEST** | train-better but invalid on the held-out test and/or not better there by `TEST_MARGIN` | `non_generalizable.md` (NEVER `dead_ends.md`) | `completed:` |
 | **FAILED** | diff never applied, no usable metric, a train- or test-eval infra error, or the frozen candidate is gone — the proposal was never really tested | none | stays in `pending:` (re-queue bookkeeping + claim-file release in 5e), never a dead end |
+
+`baseline_shared` is the global infrastructure exception to the table's team columns: it has no
+team queue row or claim file, and no outcome writes `dead_ends.md` or `non_generalizable.md`.
 
 **One FAILED case never reaches the table: `claim_lost`.** If 5a2 finds that v1 of the claim file
 names someone else, you are not the holder — post no `[RESULT]`, write no team file, **write no
@@ -1228,6 +1281,7 @@ from pathlib import Path
 # Worst case the parse fails → fitness stays None → 5b marks FAILED, the
 # queue claim is released, and the proposal stays available for a fresh agent.
 exp_id      = pending_result["exp_id"]
+is_baseline_resume = (exp_id == "baseline_shared")
 our_metric  = pending_result.get("fitness")        # TRAIN split
 is_valid    = pending_result.get("is_valid")       # TRAIN split
 test_fitness  = pending_result.get("test_fitness")     # held-out TEST split, or None
@@ -1287,13 +1341,27 @@ def claim_v1_holder(ws_id, path):
     return None
 
 import re
-claim_path    = pending_result.get("claim_path") or claim_path_for(exp_id)
-_m_att        = re.match(r"^claims/.*\.r(\d+)\.md$", claim_path)
-claim_attempt = int(_m_att.group(1)) if _m_att else 0   # 5e opens attempt+1 when it releases
-claim_raw    = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/{claim_path}", headers=HEADERS)
-claim_fm     = parse_claim((claim_raw.json() or {}).get("content")) if claim_raw.status_code == 200 else {}
-claim_holder = claim_v1_holder(TEAM_WS_ID, claim_path)
-claim_released = str(claim_fm.get("released", "")).lower() == "true"
+if is_baseline_resume:
+    # baseline_shared is protected by the global baseline lock and intentionally
+    # has no team queue row or per-item claim file.
+    claim_path = None
+    claim_attempt = 0
+    claim_fm = {}
+    claim_holder = AGENT_NAME
+    claim_released = False
+else:
+    claim_path = pending_result.get("claim_path") or claim_path_for(exp_id)
+    _m_att = re.match(r"^claims/.*\.r(\d+)\.md$", claim_path)
+    claim_attempt = int(_m_att.group(1)) if _m_att else 0   # 5e opens attempt+1 when it releases
+    claim_raw = requests.get(
+        f"{API}/workspaces/{TEAM_WS_ID}/files/{claim_path}", headers=HEADERS
+    )
+    claim_fm = (
+        parse_claim((claim_raw.json() or {}).get("content"))
+        if claim_raw.status_code == 200 else {}
+    )
+    claim_holder = claim_v1_holder(TEAM_WS_ID, claim_path)
+    claim_released = str(claim_fm.get("released", "")).lower() == "true"
 
 resume_abort = (claim_holder != AGENT_NAME) or claim_released
 if resume_abort:
@@ -1674,13 +1742,25 @@ Expected: train {metric_name} = {our_metric}, test {metric_name} = {test_fitness
 stack_queued      = False   # True once the `{exp_id}_stack` item is actually in `pending:`
 stack_skip_reason = None    # "already queued" | "stack-of-a-stack" when the guards suppressed it
 try:
-    q_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/queue.md", headers=HEADERS).json()
-    q_fm  = parse_frontmatter(q_raw)
-    # Legacy bookkeeping only: a `claims:` map in queue.md excludes NOTHING under this design
-    # (the claim FILE does). Drop your own key if it is there and never read it as ownership.
-    claim_removed = q_fm.get("claims", {}).pop(AGENT_NAME, None) is not None
-    pending   = q_fm.get("pending", []) or []
-    completed = q_fm.get("completed", []) or []
+    if is_baseline_resume:
+        # The shared baseline was never a queue item and has no claim file. Do
+        # not touch this agent's team queue merely because its sentinel resumed.
+        q_raw = {}
+        q_fm = {}
+        claim_removed = False
+        pending = []
+        completed = []
+        print("[RESUME] baseline_shared: skipping team queue and claim bookkeeping.")
+    else:
+        q_raw = requests.get(
+            f"{API}/workspaces/{TEAM_WS_ID}/files/queue.md", headers=HEADERS
+        ).json()
+        q_fm = parse_frontmatter(q_raw)
+        # Legacy bookkeeping only: a `claims:` map in queue.md excludes NOTHING under this design
+        # (the claim FILE does). Drop your own key if it is there and never read it as ownership.
+        claim_removed = q_fm.get("claims", {}).pop(AGENT_NAME, None) is not None
+        pending = q_fm.get("pending", []) or []
+        completed = q_fm.get("completed", []) or []
     remaining = []
     item_moved = False
     for it in pending:
@@ -1716,7 +1796,7 @@ try:
             item_moved = True
         else:
             remaining.append(it)
-    if not item_moved:
+    if not item_moved and not is_baseline_resume:
         # The row is missing from `pending:` — and nothing in this design removes it, so
         # something out of contract did. Look in `completed:` before assuming: a completed row
         # we did not write means this exp_id was run twice (the monitor's duplicate-exp_id
@@ -1788,7 +1868,7 @@ try:
             item_moved = True
     q_fm["pending"]   = remaining
     q_fm["completed"] = completed
-    if claim_removed or item_moved:
+    if not is_baseline_resume and (claim_removed or item_moved):
         body = q_raw.get("content", "").split("---", 2)[-1]
         requests.put(f"{API}/workspaces/{TEAM_WS_ID}/files/queue.md",
             headers={**HEADERS, "If-Match": str(q_raw.get("version", 0))},
@@ -1805,7 +1885,7 @@ try:
     # Terminal outcomes (KEEP / NEAR_MISS / DISCARD / REJECTED_TEST) leave their claim file
     # alone: the item is in `completed:`, nobody can claim it, and the file is the record of
     # who ran it. A `{exp_id}_stack` item needs no release either — a new id is a new path.
-    if outcome == "FAILED":
+    if outcome == "FAILED" and not is_baseline_resume:
         _next = claim_path_for(exp_id, claim_attempt + 1)
         requests.put(f"{API}/workspaces/{TEAM_WS_ID}/files/{claim_path}", headers=HEADERS,
                      json={"content": (f"holder: {AGENT_NAME}\n"
@@ -1831,8 +1911,10 @@ except Exception as e:
 #     would wrongly feed refuted_discards / rejected_test counters). A FAILED tested nothing at
 #     all. Create the file if absent. Keep entries structured and short — one record, no essay.
 try:
-    fname = "non_generalizable.md" if outcome == "REJECTED_TEST" else \
-            ("dead_ends.md" if outcome == "DISCARD" else None)
+    fname = None if is_baseline_resume else (
+        "non_generalizable.md" if outcome == "REJECTED_TEST" else
+        ("dead_ends.md" if outcome == "DISCARD" else None)
+    )
     if fname:
         raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/{fname}", headers=HEADERS).json()
         head = "# Non-Generalizable\n\n" if fname == "non_generalizable.md" else "# Dead Ends\n\n"
@@ -1920,7 +2002,11 @@ try:
     except Exception:
         _dtxt = ""
     _dlines = _dtxt.splitlines()
-    if not _dtxt:
+    if is_baseline_resume:
+        diff_section = (
+            "(no diff by design — `baseline_shared` evaluates the unchanged champion)"
+        )
+    elif not _dtxt:
         diff_section = (f"(no diff artifact on disk{_dnote} — resumed session; "
                         f"the change is described under ## Change)")
     elif len(_dlines) <= 80:
@@ -2081,6 +2167,12 @@ _dup_note = ("" if not duplicate_execution else
              f"`{exp_id}` was ALSO run by another agent — the queue claim was not exclusive. "
              f"Their result file was left intact; this cycle's numbers were APPENDED to it "
              f"under `## Duplicate execution`.")
+_result_team = None if is_baseline_resume else MY_TEAM
+_result_tags = (
+    ["type:infrastructure", f"outcome:{outcome}", "resumed:true"]
+    if is_baseline_resume
+    else [f"team:{MY_TEAM}", "type:result", f"outcome:{outcome}", "resumed:true"]
+)
 r = requests.post(f"{API}/posts", headers=HEADERS, json={
     "workshop": WORKSHOP,
     "title": f"[RESULT] {exp_id}: {metric_name}={our_metric} ({outcome})",
@@ -2089,8 +2181,8 @@ r = requests.post(f"{API}/posts", headers=HEADERS, json={
                f"{_test_line}\n"
                f"Outcome: {outcome}{_reason}{_stack_line}{_requeue_line}\n"
                f"Resumed-from-prior-session: true\n\n"
-               f"## Team\n{MY_TEAM}{_dup_note}",
-    "tags": [f"team:{MY_TEAM}", "type:result", f"outcome:{outcome}", "resumed:true"]
+               f"## Team\n{_result_team or 'global shared baseline'}{_dup_note}",
+    "tags": _result_tags,
 })
 
 # 5h. Mark posted (prevents duplicate post next cycle — DO NOT SKIP), then backfill `post_id`
@@ -2134,10 +2226,12 @@ pending_result.update({"status": "posted", "posted_to_workshop": True,
                        # axis direction and is never overwritten with the champion's "minimize".
                        "stack_requeued_as": stack_requeue if stack_queued else None,
                        "stack_requeue_skipped": stack_skip_reason,
-                       "requeued_to_pending": (outcome == "FAILED"),
+                       "requeued_to_pending": (
+                           outcome == "FAILED" and not is_baseline_resume
+                       ),
                        # Which claim file this cycle held, and whether we handed it back.
                        "claim_path": claim_path,
-                       "claim_released": (outcome == "FAILED"),
+                       "claim_released": (outcome == "FAILED" and not is_baseline_resume),
                        "last_failure": resume_failure,
                        "result_post_id": _result_post_id,
                        "posted_at": datetime.now(timezone.utc).isoformat()})
@@ -2241,7 +2335,7 @@ Before you do ANY work, confirm in your head:
 - [ ] I picked exactly ONE branch from the Part 0 table.
 - [ ] If I am not the monitor and I have a team: I cleared the review backlog first (Part 1 (Boot), § Review backlog) — up to `REVIEW_CAP` oldest `review_status: pending` items across ALL team queues, none of them my own proposal, none of them an item with no `proposal_post` (unreviewable — an analyst repairs those), each reviewed with a leading `[REVIEW-OK]` / `[REVIEW-BLOCK]` and real reasoning; an empty backlog means I posted NOTHING, and I never padded to reach a count. **That one pass IS my role file's review step (ROLE-CPU Step 0.5 / ROLE-ANALYST Step 0.1) — I did not run a second batch there; `REVIEW_CAP` is per spawn, not per step.**
 - [ ] If resume-waiting: I will NOT claim new work; the eval is still running from my own session.
-- [ ] If Part 5 (resume-and-post): I will re-verify that v1 `updatedBy` of my claim file still names me BEFORE spending anything (5a2) and stop with `FAILED(claim_lost)` and no post if it does not; I will finish the held-out test gate if `test_status != "complete"`, decide KEEP / NEAR_MISS / DISCARD / REJECTED_TEST / FAILED, write `results/{exp_id}.md` (5f2 — a resume writes the result file like any other cycle), post the prior result, backfill its `post_id` and set `posted_to_workshop=true`; a FAILED item stays in `pending:` AND I release its claim file so somebody else can take it (never `completed:`, never dead_ends.md); a NEAR_MISS completes AND adds `{exp_id}_stack` to `pending:`, writes no team file, and leaves both champion files untouched; I will NOT edit `algo.py` and will NOT start a new experiment.
+- [ ] If Part 5 (resume-and-post): I will first obey the shared-baseline wait above. Once it permits continuation, for an ordinary candidate I will re-verify that v1 `updatedBy` of my claim file still names me BEFORE spending anything (5a2) and stop with `FAILED(claim_lost)` and no post if it does not; `baseline_shared` has no team claim file and uses the explicit baseline exception. I will finish the held-out test gate if `test_status != "complete"`, decide KEEP / NEAR_MISS / DISCARD / REJECTED_TEST / FAILED, write `results/{exp_id}.md` (5f2 — a resume writes the result file like any other cycle), post the prior result, backfill its `post_id` and set `posted_to_workshop=true`; an ordinary FAILED item stays in `pending:` AND I release its claim file so somebody else can take it (never `completed:`, never dead_ends.md); a NEAR_MISS completes AND adds `{exp_id}_stack` to `pending:`, writes no team file, and leaves both champion files untouched; I will NOT edit `algo.py` and will NOT start a new experiment.
 - [ ] If Part 2 (discussion): I will NOT touch any training code.
 - [ ] If Part 3 (no-team): I will exit immediately after recording.
 - [ ] If Part 3.5 (monitor health pass): I run the pass exactly once and exit — no queue claims, no experiments, no `teams/roster.md`, no `champion/`, no loop or sleep.

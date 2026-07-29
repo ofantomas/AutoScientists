@@ -373,12 +373,54 @@ If the champion file is in `awaiting_baseline` state (no metric_value
 set yet), the WHOLE SYSTEM needs exactly ONE baseline run — not one per
 team. Use claim-based coordination to avoid duplicated baselines.
 
+Before using the lock, read `results/baseline_shared.md` from the main
+workspace. **Only** a terminal scientific verdict file resolves an awaiting
+baseline without creating a valid champion. Its parsed frontmatter must name
+`exp_id: baseline_shared`, contain numeric `fitness`, contain `is_valid`, and
+classify the outcome as exactly `DISCARD` or `REJECTED_TEST`; a
+`REJECTED_TEST` must additionally contain numeric `test_metric_value` and
+`test_is_valid`. If that whitelist matches, skip the entire lock block, go to
+Step 2, and use the original first-valid-candidate seeding rule. Every other
+absent, partial, malformed, or differently classified result means baseline
+publication is unresolved; the lock rule below still applies.
+
 ```python
 champ_raw = requests.get(f"{API}/workspaces/{MAIN_WS_ID}/files/champion.md",
                          headers=HEADERS).json()
 champ = parse_frontmatter(champ_raw)
 
+# A scientifically terminal invalid baseline resolves the wait without creating a
+# champion. Parse the file; do not infer resolution merely from its existence.
+baseline_invalid_complete = False
 if champ.get("status") == "awaiting_baseline":
+    baseline_raw = requests.get(
+        f"{API}/workspaces/{MAIN_WS_ID}/files/results/baseline_shared.md",
+        headers=HEADERS,
+    )
+    if baseline_raw.status_code == 200:
+        baseline_fm = parse_frontmatter(baseline_raw.json())
+        baseline_outcome = baseline_fm.get("outcome")
+        baseline_train_complete = (
+            isinstance(baseline_fm.get("fitness"), (int, float))
+            and baseline_fm.get("is_valid") in (0, 1)
+        )
+        baseline_test_complete = (
+            baseline_outcome != "REJECTED_TEST"
+            or (
+                isinstance(baseline_fm.get("test_metric_value"), (int, float))
+                and baseline_fm.get("test_is_valid") in (0, 1)
+            )
+        )
+        baseline_invalid_complete = (
+            baseline_fm.get("exp_id") == "baseline_shared"
+            and baseline_outcome in ("DISCARD", "REJECTED_TEST")
+            and baseline_train_complete
+            and baseline_test_complete
+        )
+
+# Enter the lock block only while the baseline is genuinely unresolved.
+baseline_stand_down = False
+if champ.get("status") == "awaiting_baseline" and not baseline_invalid_complete:
     # Bind the timestamp locally — this block is self-contained, and `now` is the
     # ONE spelling used everywhere in this file (Step 3 claim, Step 7b champion.md).
     from datetime import datetime, timezone
@@ -425,14 +467,22 @@ if champ.get("status") == "awaiting_baseline":
     else:
         # Someone else holds the lock — STAND DOWN. Never re-run the baseline "to be
         # safe": the holder writes champion.md, and you read that number when it lands.
-        # Proceed to a real experiment from queue; if the queue is empty, wait one rotation.
+        # END THIS INVOCATION through HEARTBEAT Part 6. Do not claim queue work, edit
+        # algo.py, or run TRAIN/TEST while the shared baseline is unresolved.
+        baseline_stand_down = True
         print("[BASELINE] another agent holds the shared-baseline lock; "
-              "picking a real experiment from queue instead")
-        # fall through to Step 3 (queue claim)
+              "ending this invocation without candidate work")
 ```
 
 **Never run baseline on a team-by-team basis.** The champion metric is
-global — one run is sufficient.
+global — one run is sufficient. A non-holder does not continue to Step 2 or
+Step 3: it performs the normal Part 6 handoff and exits. The parent will launch
+a fresh invocation after the holder has published the baseline.
+
+**HARD STOP:** if `baseline_stand_down` is true, execute no code below this
+point. Set the Part-6 branch to `normal`, record that this invocation waited for
+the shared baseline, emit the normal completion promise, and exit. Do not inspect
+or claim a queue item first.
 
 ### Step 2 — Read Champion Config
 
@@ -1126,12 +1176,15 @@ Say plainly in the result file and the [RESULT] post that the cycle was aborted 
 check, and which part of the proposal tripped it, so the analyst can re-propose a continuous form.
 Step 6 re-queues the item; it is never a dead end and never a stagnation tick.
 
-**Before evaluating, verify the diff actually landed.** If the code edit failed, `apply_patch` or
-`patch -p1` printed `FAILED` / `Hunk #N FAILED`, or the resulting `algo.py` is byte-identical to
-`champion/algo.py`, the proposal was NOT tested — evaluation would just re-measure the baseline. Set
-`item["diff_applied"] = False`, skip evaluation, and post `[RESULT] {exp_id}: FAILED` so the proposal
-can be re-queued with a fresh diff. A phantom KEEP from an unapplied diff corrupts the champion
-lineage — never let the unchanged baseline be mistaken for evidence about a change.
+**Before evaluating, verify the diff actually landed.** For an ordinary proposal, if the code edit
+failed, `apply_patch` or `patch -p1` printed `FAILED` / `Hunk #N FAILED`, or the resulting `algo.py`
+is byte-identical to `champion/algo.py`, the proposal was NOT tested — evaluation would just
+re-measure the baseline. Set `item["diff_applied"] = False`, skip evaluation, and post
+`[RESULT] {exp_id}: FAILED` so the proposal can be re-queued with a fresh diff. The deliberate
+`baseline_shared` run is the sole exception: its purpose is to evaluate the unchanged champion, so
+byte identity is required and counts as an applied experiment. A phantom KEEP from an unapplied
+ordinary diff corrupts the champion lineage — never let the unchanged baseline be mistaken for
+evidence about a change.
 
 ```python
 import filecmp, json, os
@@ -1141,7 +1194,7 @@ from datetime import datetime, timezone
 ws  = Path(f"{FOCUS_ROOT}/agents/{AGENT_NAME}/workspace")
 rep = ws / "repo"
 
-diff_applied = not filecmp.cmp(
+diff_applied = is_baseline or not filecmp.cmp(
     str(rep / "algo.py"),
     f"{FOCUS_ROOT}/champion/algo.py",
     shallow=False,
@@ -1643,9 +1696,8 @@ diff_applied = bool(item.get("diff_applied", True))  # default True for legacy i
 # "wins" are noise-level and just make the champion crawl. KEEP_MARGIN is in
 # mean_rel_steps units (1e-4 ≈ 0.01% fewer relative force calls). Matches TEST_MARGIN and the
 # upstream opt_problem contract's `significant_change`. It was 1e-3 (an AutoScientists-only
-# refinement); that was 10x stricter than the contract and silently discarded real improvements
-# WITHOUT spending a test eval on them — observed: a valid candidate 6.96e-4 better than champion
-# was dropped untested, and it was the best result of that run.
+# refinement); that was 10x stricter than the contract and could silently discard real improvements
+# without spending a test eval on them.
 KEEP_MARGIN = 1e-4
 # TEST_MARGIN matches the upstream opt_problem contract's `significant_change`.
 TEST_MARGIN = 1e-4
@@ -1884,6 +1936,10 @@ _per_molecule_block = (
 if cycle_aborted and not diff_lines:
     diff_section = ("(no diff — cycle aborted before any code was written; "
                     f"reason: {cycle_aborted})")
+elif is_baseline:
+    diff_section = (
+        "(no diff by design — `baseline_shared` evaluates the unchanged champion)"
+    )
 elif not diff_applied or not diff_lines:
     diff_section = "(no diff — the change did not apply; candidate was byte-identical to champion)"
 elif len(diff_lines) <= 80:
@@ -2045,9 +2101,10 @@ replacement once the [RESULT] post exists.
 
 ### Step 6 — Release Claim; Complete or Re-Queue the Item
 
-This step runs for **every** outcome — KEEP, DISCARD, REJECTED_TEST and FAILED alike. The claim is
-always dropped: a silently-held claim blocks the item for the whole run. What differs is where the
-item lands.
+This step runs for **every** outcome — KEEP, DISCARD, REJECTED_TEST and FAILED alike. For an
+ordinary candidate, the claim is always dropped: a silently-held claim blocks the item for the
+whole run. `baseline_shared` has no queue row or claim and takes the explicit no-op branch below.
+What differs for an ordinary candidate is where the item lands.
 
 The row stayed in `pending:` for the whole cycle — the claim never moved it (Step 3) — so this is the
 ordinary `pending:` → `completed:` move, not a reconstruction from a snapshot. Releasing the claim is
@@ -2439,6 +2496,7 @@ else:
     # Hoisted out of the f-string: `{}` literals inside an f-string expression only parse
     # on Python 3.12+, and this template must not depend on the agent's interpreter version.
     _sc, _ts = (score or {}), (test_score or {})
+    _test_score_shared = {k: v for k, v in _ts.items() if k != "per_molecule"}
     _train_valid = int(_sc.get("is_valid", 0))
     _test_valid_i = int(_ts.get("is_valid", 0))
     # Already a JSON object literal, which IS valid YAML flow style — the one field that must
@@ -2487,8 +2545,10 @@ settings: {_settings}
 
 ## Held-out Test Score
 
+Aggregate fields only; TEST `per_molecule` is deliberately omitted from shared champion state.
+
 {FENCE}json
-{json.dumps(test_score, indent=2, sort_keys=True)}
+{json.dumps(_test_score_shared, indent=2, sort_keys=True)}
 {FENCE}
 
 ## Reproduction
@@ -2694,13 +2754,14 @@ if outcome == "NEAR_MISS" and not duplicate_execution:
           f"no dead_ends.md / non_generalizable.md write by design.")
 ```
 
-**If DISCARD:** write the result to `dead_ends.md` in your team workspace so analysts and other
-cpu-eval agents do not re-run this exact mechanism, and so it counts one toward its axis's closure
-count. **One DISCARD closes nothing on its own** — the axis stays open until enough results
-accumulate against it with no KEEP or NEAR_MISS in between, and that count is the analysts' to keep
-(ROLE-ANALYST / ROLE-TEAM own the threshold). Recording an entry here is evidence, not a verdict on
-the whole axis; treating it as one purges a team's queue on the strength of a single result. Use
-If-Match to avoid clobbering concurrent writes.
+**If an ordinary candidate is DISCARD:** write the result to `dead_ends.md` in your team workspace
+so analysts and other cpu-eval agents do not re-run this exact mechanism, and so it counts one
+toward its axis's closure count. `baseline_shared` is infrastructure, not a proposed mechanism, and
+must never enter a team's negative-evidence files. **One DISCARD closes nothing on its own** — the
+axis stays open until enough results accumulate against it with no KEEP or NEAR_MISS in between,
+and that count is the analysts' to keep (ROLE-ANALYST / ROLE-TEAM own the threshold). Recording an
+entry here is evidence, not a verdict on the whole axis; treating it as one purges a team's queue on
+the strength of a single result. Use If-Match to avoid clobbering concurrent writes.
 
 **Only `outcome == "DISCARD"` may write to dead_ends.md.** `FAILED`, `NEAR_MISS` and `REJECTED_TEST`
 must NEVER be written there:
@@ -2721,7 +2782,7 @@ must NEVER be written there:
 Keep each entry to the structured fields — no prose paragraphs.
 
 ```python
-if outcome == "DISCARD":
+if outcome == "DISCARD" and not is_baseline:
     de_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/dead_ends.md",
                           headers=HEADERS).json()
     de_content = de_raw.get("content", "# Dead Ends\n\n")
@@ -2768,16 +2829,17 @@ if outcome == "DISCARD":
         print(f"Recorded DISCARD in dead_ends.md (HTTP {r.status_code})")
 ```
 
-**If REJECTED_TEST:** write to `non_generalizable.md` in your **team** workspace (create it if it
-does not exist yet). This file records changes that *did* improve train but failed the held-out gate —
-the overfitting record, and a different kind of evidence from a dead end: "didn't generalize", not
-"didn't work". Analysts read it before proposing. A REJECTED_TEST counts one toward its axis's
-closure count, exactly like a DISCARD, but it does **not** close the axis on its own; the failure is
-evidence against the *mechanism* rather than its tuning, so a re-proposal that only nudges the value
-needs a stated reason why tuning was the problem.
+**If an ordinary candidate is REJECTED_TEST:** write to `non_generalizable.md` in your **team**
+workspace (create it if it does not exist yet). This file records changes that *did* improve train
+but failed the held-out gate — the overfitting record, and a different kind of evidence from a dead
+end: "didn't generalize", not "didn't work". `baseline_shared` is infrastructure and never writes
+team scientific evidence. Analysts read this file before proposing. A REJECTED_TEST counts one
+toward its axis's closure count, exactly like a DISCARD, but it does **not** close the axis on its
+own; the failure is evidence against the *mechanism* rather than its tuning, so a re-proposal that
+only nudges the value needs a stated reason why tuning was the problem.
 
 ```python
-if outcome == "REJECTED_TEST":
+if outcome == "REJECTED_TEST" and not is_baseline:
     ng_raw = requests.get(f"{API}/workspaces/{TEAM_WS_ID}/files/non_generalizable.md",
                           headers=HEADERS).json()
     # Create-if-absent: a 404 comes back with no content/version.
@@ -2830,6 +2892,8 @@ FENCE = "`" * 3   # built at runtime so the markdown fence around this block sta
 if cycle_aborted and not diff_lines:
     diff_block = ("(no diff — cycle aborted before any code was written; "
                   f"reason: {cycle_aborted})")
+elif is_baseline:
+    diff_block = "(no diff by design — baseline_shared evaluates the unchanged champion)"
 elif not diff_applied or not diff_lines:
     diff_block = "(no diff — the change did not apply; candidate was identical to champion)"
 elif len(diff_lines) <= 80:
@@ -2897,6 +2961,14 @@ dup_note = ("" if not duplicate_execution else
 # `REPORT_EXP_ID` — not `exp_id`. They are the same value on every ordinary path; they differ
 # only after Step 5's identity-bleed abort, where filing this post under the bled id would put
 # this cycle's row on another agent's experiment in the ledger.
+_result_team = None if is_baseline else MY_TEAM
+_result_tags = (
+    ["type:infrastructure", f"outcome:{outcome}"]
+    if is_baseline
+    else [f"team:{MY_TEAM}", "type:result", f"outcome:{outcome}"]
+)
+_result_notify = [] if is_baseline else team_members
+
 r = requests.post(f"{API}/posts", headers=HEADERS, json={
     "workshop": WORKSHOP,
     "title": f"[RESULT] {REPORT_EXP_ID}: {metric_name}={our_metric} ({outcome})",
@@ -2905,9 +2977,9 @@ r = requests.post(f"{API}/posts", headers=HEADERS, json={
         f"## Result\ntrain {metric_name}: {our_metric} (delta {delta})\n{verdict}\n"
         f"Outcome: {outcome}\nRace condition: {race_condition}\n\n"
         f"## Diff\n{FENCE}diff\n{diff_block}\n{FENCE}\n\n"
-        f"## Team\n{MY_TEAM}{dup_note}"),
-    "notify_agents": team_members,
-    "tags": [f"team:{MY_TEAM}", "type:result", f"outcome:{outcome}"]
+        f"## Team\n{_result_team or 'global shared baseline'}{dup_note}"),
+    "notify_agents": _result_notify,
+    "tags": _result_tags,
 })
 result_post_id = r.json().get("id") if r.ok else None
 ```

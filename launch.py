@@ -281,9 +281,9 @@ _parser.add_argument("--protein", default=None, metavar="PROTEIN_ID",
                      help="Protein/assay to focus on, e.g. SPIKE_SARS2_Starr_2020_binding. "
                           "Substituted into task/TASK.md and task/LAUNCH.md after copying.")
 _parser.add_argument("--cpu", type=int, default=6, metavar="N",
-                     help="Number of CPU-eval agents (default: 6). Use a smaller roster for smoke "
-                          "runs. The orchestrator enumerates agents from the run directory, so any "
-                          "size works without editing runbook.md or the task profile.")
+                     help="Number of CPU-eval agents (default: 6). The Sella profile requires at "
+                          "least 4 so it can form at least 2 teams with 2 CPU agents each; other "
+                          "task profiles may define different topology constraints.")
 _parser.add_argument("--analysts", type=int, default=3, metavar="N",
                      help="Number of analyst agents (default: 3). Team formation needs at least 2 "
                           "so the discussion round can produce >= 2 competing hypotheses.")
@@ -336,6 +336,13 @@ if not _task_path.is_absolute():
 if not _task_path.is_dir():
     raise RuntimeError(f"Task directory not found: {_task_path}")
 task_source = str(_task_path)
+
+# This task's review/claim topology requires at least two teams and at least
+# two CPU-eval agents per team. Keep the generic launcher permissive for other
+# profiles, but reject an impossible Sella roster before creating any run state.
+_bundled_sella = (TEMPLATE_DIR / "task-sella").resolve()
+if (_task_path == _bundled_sella or _bundled_sella in _task_path.parents) and _args.cpu < 4:
+    _parser.error("--cpu must be >= 4 for task-sella (>=2 teams, >=2 CPU agents per team)")
 
 # Require TASK.md at the --task root. Without this, passing a directory that
 # only holds a README would silently fall back to that README, fail to parse
@@ -663,7 +670,7 @@ else:
         (RUN_DIR / cache_dir).mkdir(parents=True, exist_ok=True)
 
 # Create runtime directories inside ablation
-(RUN_DIR / "logs" / "raw").mkdir(parents=True, exist_ok=True)
+(RUN_DIR / "logs").mkdir(parents=True, exist_ok=True)
 
 print(f"  Copied: system/, task/ (from {task_source}), {program_file}")
 if (RUN_DIR / "repo").exists():
@@ -972,7 +979,7 @@ settings: {{}}
 
 # Champion Configuration
 
-No champion yet. The first agent to run the baseline will establish it.
+No champion yet. The shared-baseline lock winner will establish it.
 Check task/TASK.md for the optimization metric and the promotion contract.
 
 ## Anchors
@@ -1051,10 +1058,10 @@ Teams formed during Phase 2 discussion.
         "title": "[DISCUSSION-TRIGGER] Cold-start bootstrap — form hypothesis-based teams",
         "content": f"""# Cold-Start Bootstrap
 
-This post anchors the cold-start self-regroup: every agent that runs
-before a roster is committed should contribute to this thread, then
-the alphabetically-last analyst who participates writes
-`teams/roster.md` per Step 0.25 of ROLE-ANALYST.
+This post anchors the cold-start self-regroup: every non-monitor agent
+contributes to this thread. The lexicographically-last registered analyst
+identity waits until every registered non-monitor identity has contributed and voted, then
+writes `teams/roster.md` per Step 0.25 of ROLE-ANALYST.
 
 ## The Task
 
@@ -1069,20 +1076,23 @@ the alphabetically-last analyst who participates writes
 
 - **Dimension / hypothesis** you want the team structure to target. Describe
   it with `hypothesis / prediction / falsification` (see ROLE-ANALYST Step 0.3).
-- **≥1 cold axis** per team (an axis with zero prior experiments in the
-  workspace — see ROLE-ANALYST Step 0.25 cold-axis mandate).
+- **≥1 concrete unevaluated axis** for each proposed team. The mid-run
+  cold-axis-ledger mandate does not apply at cold start.
 - **Substantive new content per round**: a [GAPS]/[CONSTANTS]/[RANKED]
   post or comment that adds information nobody else has surfaced.
 - **Cast a self-termination vote**: `[DISCUSS-MORE]` or `[DISCUSS-DONE]`
-  as a comment ON THIS POST. Reform closes when ≥5 agents vote
-  `[DISCUSS-DONE]`.
+  as a comment ON THIS POST. Cold-start formation does not wait for the
+  mid-run quorum; it waits for one contribution and vote from every registered
+  non-monitor identity in this single parallel wave.
 
 ## How team reform closes
 
-Per ROLE-ANALYST Step 0.25: when 5+ `[DISCUSS-DONE]` votes land, the
-alphabetically-last analyst who has run in this rotation writes
-`teams/roster.md` with 3 hypothesis-based teams (each with ≥1 cold
-axis) and posts `[TEAM-REFORMED]`. This closes bootstrap.
+Per ROLE-ANALYST Step 0.25, the lexicographically-last registered analyst
+identity is the only formation/reform writer (Step 1d.5 separately enacts
+endorsed merges). At cold start it forms 2–3 viable
+hypothesis-based teams from the completed peer discussion and posts
+`[TEAM-REFORMED]`. Mid-run reform still waits for the roster-scaled
+`DISCUSS_QUORUM` defined in HEARTBEAT.
 
 No monitor intervention is required.
 
@@ -1119,16 +1129,22 @@ No monitor intervention is required.
   Task type:     {task_type_label}
 
   Continue in the same Codex session that invoked launch.py.
-  If launch.py was run manually, start one persisted orchestrator with:
+  If launch.py was run manually, start one detached persisted orchestrator with:
 
-    codex exec --dangerously-bypass-approvals-and-sandbox \\
-      -C {TEMPLATE_DIR} \\
+    mkdir -p "{ROOT / 'logs' / 'orchestrator'}"
+    nohup codex exec --dangerously-bypass-approvals-and-sandbox \\
+      -C {ROOT} \\
       -m gpt-5.6-sol \\
       -c 'model_reasoning_effort="xhigh"' \\
+      --enable multi_agent \\
       -c 'agents.default_subagent_model="gpt-5.6-sol"' \\
       -c 'agents.default_subagent_reasoning_effort="xhigh"' \\
       -c agents.max_concurrent_threads_per_session=10 \\
-      "Read {ROOT / program_file} and execute continuously as the only top-level orchestrator. Use fresh native Codex subagents only for the materialized roster."
+      --json \\
+      "Read {ROOT / program_file} and execute continuously as the only top-level orchestrator. Use fresh native Codex subagents only for the materialized roster." \\
+      >"{ROOT / 'logs' / 'orchestrator' / 'events.jsonl'}" \\
+      2>"{ROOT / 'logs' / 'orchestrator' / 'stderr.log'}" </dev/null &
+    echo $! >"{ROOT / 'logs' / 'orchestrator' / 'pid'}"
 """)
 
 

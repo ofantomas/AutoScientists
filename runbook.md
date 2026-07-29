@@ -24,7 +24,6 @@ Once the run is live (Step 3 onward), this is the **complete** list of files you
 |---|---|---|
 | `logs/experiments.jsonl` | append-only, one row per experiment, via the `cycle_ledger` hook | Step 5d |
 | `logs/sessions.jsonl` | append-only, one row per finished agent session | Step 5d |
-| `logs/raw/{agent}_{timestamp}_{nonce}.json` | write-once native child completion artifact | Step 5d |
 | run-level metadata you created yourself and no agent reads (scratch notes under `FOCUS_ROOT`) | free | any |
 | a team's `queue.md` **seed items** | additive only — append to `pending:`, touch nothing else | Step 4 only, and only if the `seeding_policy` hook says *orchestrator-seeded* |
 
@@ -42,7 +41,7 @@ Pre-launch is the one different regime: at Step 0 Case A you may edit the freshl
 This workshop API does not enforce `If-Match`, does not enforce `If-None-Match: "*"`, and returns 403 on `DELETE /posts/{id}` — so every mutual-exclusion mechanism in this system is verified by **read-back**, never by a write's status code. That non-enforcement is tempting to confirm by hand. Do not confirm it on a live file. Verified incident: the orchestrator PUT `PROBE-SHOULD-BE-REJECTED` over the entire body of `baseline_lock.md` and restored it 15 seconds later. For those 15 seconds the lock had no `holder:` key, so any cpu-eval agent parsing it would have read an *unheld* lock and could have launched a duplicate 250-molecule baseline eval. Fifteen seconds is enough. If you genuinely need to check API behaviour, probe a **throwaway path you created yourself** (e.g. `_probe_lock.md`) and never a path any agent reads.
 
 **NEVER STOP. NEVER ASK PERMISSION. LOOP CONTINUOUSLY.**
-Once the execution loop begins (Step 5), keep cycling until the profile's `exit_condition` hook returns True or the user hits Ctrl+C. Do not pause to ask "should I keep going?" after 3, 5, 10, or any number of cycles. The user may be away for hours or days. Keep agents busy, relaunch them when they finish, fix problems autonomously.
+Once the execution loop begins (Step 5), keep cycling until the profile's `exit_condition` hook returns True or the operator explicitly stops the process. Do not pause to ask "should I keep going?" after 3, 5, 10, or any number of cycles. The user may be away for hours or days. Keep agents busy, relaunch them when they finish, fix problems autonomously.
 
 **SPAWN EXACTLY THE ROSTERED AGENTS — NOTHING ELSE.**
 The roster is whatever `launch.py` created — it is sized at launch by `--cpu N --analysts M`, so there is no fixed count and no fixed agent-name range. **Enumerate it from disk every time you need it** (`{FOCUS_ROOT}/agents`, directories only, skipping dotfiles) and launch exactly the agents you find, in the roles the profile's hooks define. Never hardcode a roster size, a loop bound, or an agent index — a hardcoded count silently under-launches a large roster and invents nonexistent agents on a small one. **Do not spawn ad-hoc helper subagents** for work you can do inline: reading files, parsing `[RESULT]` posts, writing the ledger, reading queue depth and claim ages, running the meta pass. (Note what is *not* on that list: *releasing* a stale claim is a write to that item's `claims/{exp_id}.md` file — the run's mutual-exclusion record — so it is neither yours to do inline nor a subagent's. It belongs to the rostered monitor, which alone proves the holder's session ended first. See Step 5f.) Delegation feels cheap and is not — an extra subagent duplicates context, races on the same workspace files, and produces work nobody harvests. If a task is not "run an experiment" or "produce proposals", it is yours to do directly.
@@ -143,7 +142,7 @@ Every roster launch below uses Codex's native `spawn_agent` tool. Treat the Pyth
 blocks as launch specifications, not as shell commands:
 
 - Spawn every independent child in the wave before waiting and retain the canonical target returned
-  for each AS identity (plus an opaque child ID if the installed tool emits one). Repeatedly call
+  for each AS identity. Repeatedly call
   `wait_agent` with a bounded timeout (at most 60 seconds), then call `list_agents` and match each
   retained target to `agent_name` and `agent_status`. Continue until every child in the wave has a
   terminal state. A `wait_agent` timeout is only a polling wake-up; it is not an agent failure and
@@ -179,11 +178,18 @@ The base launch pattern (used if the profile says "run discussion"):
 # ROLE-ANALYST use to size DISCUSS_QUORUM, so the roster all three see agrees.
 import os
 _agents_dir = FOCUS_ROOT / "agents"
-non_admin_agents = [a for a in os.listdir(_agents_dir)
-                    if not a.startswith(".")
-                    and os.path.isdir(os.path.join(_agents_dir, a))
-                    and "monitor" not in a]
+non_admin_agents = sorted(a for a in os.listdir(_agents_dir)
+                          if not a.startswith(".")
+                          and os.path.isdir(os.path.join(_agents_dir, a))
+                          and "monitor" not in a)
+analysts = [a for a in non_admin_agents if "_analyst" in a]
+if not analysts:
+    raise RuntimeError("Cold-start formation requires at least one registered analyst.")
 
+# Spawn the complete discussion wave in parallel. Roster ownership is a role
+# instruction, not a second parent launch: the lexicographically-last registered
+# analyst waits inside its own discussion contract until every registered
+# non-monitor identity has contributed, then executes ROLE-ANALYST Step 0.25.
 discussion_children = {}
 for agent_name in non_admin_agents:
     discussion_children[agent_name] = spawn_agent(
@@ -199,8 +205,14 @@ for agent_name in non_admin_agents:
         ),
         fork_turns="none",
     )
-# All children are now running in parallel. Apply the wait/list protocol above to their targets.
 ```
+
+**Formation barrier:** apply the wait/list protocol to every retained
+`discussion_children` target and do not enter Step 4 until every child completed
+successfully and returned its required branch-qualified promise. An
+`errored`/`interrupted` child is not a completed scientific contribution. Stop
+and report that exact child rather than pretending the discussion wave
+finished. The parent does not choose or relaunch a roster writer.
 
 > **Model choice.** The orchestrator is launched with `-m gpt-5.6-sol`. The launch command also
 > sets `agents.default_subagent_model="gpt-5.6-sol"`, and every `spawn_agent` call leaves
@@ -219,14 +231,24 @@ for agent_name in non_admin_agents:
 
 **`MODE=discussion` is mandatory.** Without it, the heartbeat's Mode Selector cannot route CPU-eval agents to the Discussion branch, and they will fall through to "no team → exit" or freelance experiments.
 
-**Expected duration: 5–15 minutes per agent.** All agents post one [DISCUSSION] thread and exit. Extended thinking is on by default, so agents take longer than the numbers older runs were calibrated against; treat duration as a **soft signal, not an alarm**. Past ~25 minutes, investigate (likely an old heartbeat or the agent skipped Part 0) — read its transcript before doing anything. Do not kill or relaunch agents on a timer, and do not act on a single slow cycle: watch two consecutive cycles first.
+**Expected duration: 5–15 minutes per agent.** Every agent makes one substantive
+discussion contribution and casts its vote; each may create at most one new
+thread and may instead add a substantive comment when that best advances the
+round. Extended thinking is on by default, so agents take longer than the
+numbers older runs were calibrated against; treat duration as a **soft signal,
+not an alarm**. Past ~25 minutes, investigate (likely an old heartbeat or the
+agent skipped Part 0) — read its transcript before doing anything. Do not kill
+or relaunch agents on a timer, and do not act on a single slow cycle: watch two
+consecutive cycles first.
 
 ## Step 4 — Confirm teams + seed queues
 
-**Teams are formed by the ANALYSTS, in Step 3.** The alphabetically-last analyst of the discussion
-round writes `teams/roster.md` via ROLE-ANALYST Step 0.25, reached from HEARTBEAT § 2b3. Neither the
-monitor nor this orchestrator writes that file — the monitor launch below is a health pass, not a
-formation step.
+**Teams are formed by the ANALYSTS, in Step 3.** The lexicographically-last registered analyst is
+the sole formation/reform writer via ROLE-ANALYST Step 0.25, reached from HEARTBEAT § 2b3. The
+separate ROLE-ANALYST Step 1d.5 may write the roster only to enact an endorsed merge. At cold start
+the parent launches every non-monitor participant in one parallel wave; the designated analyst
+waits for all registered non-monitor contributions before writing. The parent does not choose hypotheses
+or write `teams/roster.md` itself. The monitor launch below is a health pass, not a formation step.
 
 ```python
 bootstrap_monitor = spawn_agent(
@@ -245,72 +267,22 @@ bootstrap_monitor = spawn_agent(
 # Apply the wait/list protocol above to bootstrap_monitor before continuing.
 ```
 
-Verify teams were formed — with a bounded recovery, never a bare assert. A slow bootstrap (an
-analyst still finishing its discussion cycle, or a round that produced no alphabetically-last
-analyst) must not kill an otherwise healthy run:
+Verify that the designated analyst committed the roster before continuing:
 
 ```python
-import time
-
 def read_teams():
     roster_raw = requests.get(f"{API}/workspaces/{WS_ID}/files/teams/roster.md",
                               headers=HEADERS).json()
     return (parse_fm(roster_raw) or {}).get("teams", {}) or {}
 
-def relaunch_analysts_for_formation():
-    """Re-run the discussion branch for analysts only. Step 0.25 is idempotent:
-    if a roster already exists it reforms nothing without a converged trigger."""
-    analysts = [a for a in os.listdir(FOCUS_ROOT / "agents") if "analyst" in a]
-    formation_children = {}
-    for agent_name in analysts:
-        formation_children[agent_name] = spawn_agent(
-            task_name=codex_task_name(agent_name, "formation_retry"),
-            message=(
-                f"You are {agent_name}.\n"
-                f"FOCUS_ROOT={FOCUS_ROOT}\n"
-                f"MODE=discussion\n"
-                f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
-                f"You MUST start at Part 0 (Mode Selector).\n"
-                f"Do not spawn additional subagents; execute this roster role yourself.\n"
-                f"teams/roster.md is still empty. HEARTBEAT 2b3 -> ROLE-ANALYST Step 0.25 "
-                f"is the ONLY writer of that file; run it this cycle.\n"
-            ),
-            fork_turns="none",
-        )
-    return formation_children
-
-# Poll first — formation may simply not have landed yet.
-formation_children = {}
 teams = read_teams()
-for _ in range(10):            # ~10 min
-    if len(teams) >= 2:
-        break
-    time.sleep(60)
-    teams = read_teams()
-
-if len(teams) < 2:
-    print("[BOOTSTRAP] roster still empty after polling — relaunching analysts once")
-    formation_children = relaunch_analysts_for_formation()
-    for _ in range(20):        # ~20 min for the retry round
-        time.sleep(60)
-        teams = read_teams()
-        if len(teams) >= 2:
-            break
-
-# REQUIRED ORCHESTRATOR ACTION: if formation_children is non-empty, apply the native
-# wait_agent/list_agents protocol above to those retained targets before leaving bootstrap. The roster
-# file landing is not itself proof that every retry child exited.
-
 if len(teams) < 2:
     raise RuntimeError(
-        "Teams not formed after a discussion round and one analyst relaunch. "
-        "teams/roster.md is written ONLY by ROLE-ANALYST Step 0.25, reached via "
-        "HEARTBEAT 2b3 on the MODE=discussion branch. Likely causes, in order: "
-        "(1) the analysts were launched without MODE=discussion, so Part 0 never "
-        "routed them to Part 2; (2) no analyst identified itself as the "
-        "alphabetically-last one to run this round; (3) Step 0.25 withheld the "
-        "roster on the cold-axis mandate — it does not apply at cold start. "
-        "Read an analyst transcript before relaunching anything."
+        "The designated analyst completed without forming at least two viable teams. "
+        "Formation/reform of teams/roster.md is written ONLY by ROLE-ANALYST Step 0.25, "
+        "reached via "
+        "HEARTBEAT 2b3 on the MODE=discussion branch. Inspect that analyst's completion "
+        "and the discussion posts before resuming; do not create another writer."
     )
 ```
 
@@ -322,6 +294,7 @@ if len(teams) < 2:
 cycle_count = 0
 while True:
     cycle_count += 1
+    cycle_child_started_at = {}
     print(f"\n{'='*60}\nCYCLE {cycle_count}\n{'='*60}\n")
 
     # 5a — Pre-cycle check (may signal early exit)
@@ -366,6 +339,7 @@ analysts = sorted(a for a in os.listdir(_agents_dir)
 # Spawn the full analyst wave before waiting.
 analyst_children = {}
 for analyst_name in analysts:
+    cycle_child_started_at[analyst_name] = datetime.now(timezone.utc).isoformat()
     analyst_children[analyst_name] = spawn_agent(
         task_name=codex_task_name(analyst_name, "analyst_cycle", cycle_count),
         message=(
@@ -397,16 +371,15 @@ This is the biggest variation between profiles, so the entire body lives in the 
 ### 5d. Wait, log sessions, then write the experiment ledger
 
 When each agent finishes, use the retained spawn result plus the child's terminal notification to
-write one run-local completion artifact, then append the existing session record. The artifact is
-not a full tool transcript (that remains in the persisted parent Codex session), but it binds the
-logical AS identity to the native child and its returned result:
+append one compact session record. This binds the logical AS identity to the native child without
+duplicating the transcript retained by the persisted parent Codex session:
 
 ```python
 # `children` is the wave mapping being harvested (`analyst_children` or
 # `cpu_children`); `agents_snapshot` is the latest `list_agents()` result.
 spawn_result = children[agent_name]
+started_at = cycle_child_started_at[agent_name]
 codex_target = spawn_result["task_name"]
-codex_agent_id = spawn_result.get("agent_id")  # None in Codex builds that return only task_name
 child_record = next(a for a in agents_snapshot["agents"]
                     if a["agent_name"] == codex_target)
 native_status = child_record["agent_status"]
@@ -429,33 +402,15 @@ expected_promise = re.compile(
 promise_received = (child_terminal_status == "completed"
                     and expected_promise.search(child_final_message or "") is not None)
 ended_at = datetime.now(timezone.utc).isoformat()
-completion = {
-    "agent": agent_name,
-    "cycle": cycle_count,
-    "codex_target": codex_target,              # list_agents.agent_name / canonical task path
-    "codex_agent_id": codex_agent_id,          # null if this CLI emits no separate opaque ID
-    "codex_task_name": codex_target.rsplit("/", 1)[-1],
-    "terminal_status": child_terminal_status,
-    "promise_received": promise_received,
-    "final_message": child_final_message,      # null only if the native completion omitted it
-    "ended_at": ended_at,
-}
-raw_name = f"{agent_name}_{ended_at.replace(':', '')}_{uuid4().hex[:16]}.json"
-raw_path = FOCUS_ROOT / "logs" / "raw" / raw_name
-raw_path.write_text(json.dumps(completion, ensure_ascii=False, indent=2) + "\n")
 
 session = {
     "agent": agent_name,
     "cycle": cycle_count,
+    "codex_target": codex_target,
     "started_at": started_at,
     "ended_at": ended_at,
-    "status": "success" if promise_received else "timeout",
-    "promise_received": promise_received,
-    "codex_target": codex_target,
-    "codex_agent_id": codex_agent_id,
-    "codex_task_name": codex_target.rsplit("/", 1)[-1],
     "terminal_status": child_terminal_status,
-    "completion_artifact": str(raw_path.relative_to(FOCUS_ROOT)),
+    "promise_received": promise_received,
 }
 with open(FOCUS_ROOT / "logs" / "sessions.jsonl", "a") as f:
     f.write(json.dumps(session) + "\n")
@@ -745,6 +700,6 @@ If True, fall through to Step 6. Otherwise continue from Step 5a.
 - Rewrite, sort, or truncate `logs/experiments.jsonl` — it is append-only
 - Skip the `cycle_ledger` hook: an unlogged cycle is an invisible cycle
 - Step in because an agent is slow or failed — report it, let the monitor release the claim, relaunch the agent
-- Stop the loop without the `exit_condition` hook returning True, except on user Ctrl+C
+- Stop the loop without the `exit_condition` hook returning True, except on an explicit operator stop
 
 → PROFILE HOOK: `never_do_extras` (profile-specific additions to this list)

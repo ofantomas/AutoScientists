@@ -7,7 +7,7 @@ description: Analyst agent protocol — research, propose, discuss, prune
 
 **STOP. Did you go through HEARTBEAT Part 0 first?** If not, go back. This file is mostly for agents routed into Part 4 (Normal Cycle). If the Mode Selector sent you to Part 3 (No-Team), follow that branch — not this file.
 
-**Carve-out for `MODE=discussion`.** Four steps here are the discussion round's own machinery and are **required on the Part 2 (Discussion) branch**: **Step 0.2**, **Step 0.2b**, **Step 0.7**, and **Step 0.25**. HEARTBEAT § 2b3 routes you back here to run them. If the Mode Selector sent you to Part 2, execute exactly those four and nothing else from this file. Step 0.25 is the only writer of `teams/roster.md` in the entire system; skipping it on the discussion branch strands the run in cold start.
+**Carve-out for `MODE=discussion`.** Four steps here are the discussion round's own machinery and are **required on the Part 2 (Discussion) branch**: **Step 0.2**, **Step 0.2b**, **Step 0.7**, and **Step 0.25**. HEARTBEAT § 2b3 routes you back here to run them. If the Mode Selector sent you to Part 2, execute exactly those four and nothing else from this file. Step 0.25 is the only discussion-branch formation/reform writer of `teams/roster.md`; the separate Step 1d.5 remains the merge-enactment writer. Skipping Step 0.25 on the discussion branch strands the run in cold start.
 
 **Step 0.1 (review backlog) sits outside that carve-out and applies in every mode.** It is an obligation you owe on spawn, not cycle machinery: a review is what makes another agent's queued item claimable at all, so a rotation that skips reviewing leaves the queue unclaimable and the eval pool idle for the rotation after it. **HEARTBEAT Part 1 (Boot), § Review backlog** already executes it at boot on every branch — that boot pass IS Step 0.1, and you do not run a second batch; Step 0.1 is where the rules it applies are written down for this role. (Part 1, not Part 0: Part 0 is the Mode Selector and contains no review code, so an analyst who looks there, finds nothing and concludes the sweep never ran will either double-review or skip the obligation entirely.)
 
@@ -324,10 +324,9 @@ is how the system self-organizes when hypotheses are exhausted.
 Check these conditions at the start of every analyst cycle:
 
 ```python
-# Count rotations since the most recent KEEP. A "rotation" is a
-# complete cycle of the rotation schedule (all 9 non-monitor agents).
-# Use experiment timestamps to bucket into rotations, or count
-# workshop [RESULT] posts in batches of ~6.
+# Count rotations since the most recent KEEP. A rotation is one canonical
+# `cycle` value in logs/experiments.jsonl; never infer it from a fixed roster
+# size or a fixed number of [RESULT] posts.
 recent_keeps = [r for r in recent_results if r.outcome == "KEEP"]
 if recent_keeps:
     rotations_since_keep = estimate_rotations_since(recent_keeps[-1].timestamp)
@@ -351,12 +350,12 @@ falsified_since_reform = any(
 # without any new KEEP is a real plateau.
 trigger_conditions = (rotations_since_keep >= 3) or falsified_since_reform
 
-# Is there already an active [DISCUSSION-TRIGGER] ?
+# Is there already an unresolved [DISCUSSION-TRIGGER]?
 #
-# The quorum block below is a VERBATIM COPY of HEARTBEAT Part 0 Check A2, down to
-# the bytes. Keep it that way: if the two computations diverge by even one agent,
-# HEARTBEAT and this file disagree about whether a discussion round is still open,
-# and agents split between running experiments and discussing them.
+# Match HEARTBEAT Part 0 Check A2: the trigger remains unresolved until the
+# designated analyst publishes [TEAM-REFORMED] or [SYSTEM-EXHAUSTED] and names
+# the trigger id in that post's body. Quorum controls who is routed; reaching
+# quorum does not itself close the trigger.
 # QUORUM SCALES WITH THE ROSTER. launch.py sizes the roster (--cpu / --analysts), so a
 # hardcoded count silently becomes a supermajority on a small roster and deadlocks the run:
 # 5-of-9 is a simple majority, but 5-of-6 is 83%. Compute it from the actual roster.
@@ -370,12 +369,26 @@ _non_monitor = [a for a in os.listdir(_agents_dir)
                 and "monitor" not in a]
 DISCUSS_QUORUM = max(2, math.ceil(len(_non_monitor) / 2))   # 9 -> 5, 6 -> 3, 4 -> 2
 
-active_trigger_exists = any(
-    "[DISCUSSION-TRIGGER]" in p.title
-    and age_rotations(p) <= 3
-    and count_comments_matching(p.id, "[DISCUSS-DONE]") < DISCUSS_QUORUM
-    for p in recent_posts
-)
+_discussion_triggers = [
+    p for p in recent_posts if "[DISCUSSION-TRIGGER]" in p.title
+]
+
+def _trigger_resolved(trigger):
+    return any(
+        any(marker in p.title
+            for marker in ("[TEAM-REFORMED]", "[SYSTEM-EXHAUSTED]"))
+        and str(trigger.id) in (getattr(p, "content", "") or "")
+        for p in recent_posts
+    )
+
+# list_workshop_posts returns newest-first, matching HEARTBEAT. Both consumers
+# therefore select the same newest unresolved trigger and suppress a new trigger
+# while any older unresolved one remains queued behind it.
+_unresolved_triggers = [
+    trigger for trigger in _discussion_triggers if not _trigger_resolved(trigger)
+]
+active_trigger = _unresolved_triggers[0] if _unresolved_triggers else None
+active_trigger_exists = active_trigger is not None
 ```
 
 **If `trigger_conditions` is True AND no active trigger exists:**
@@ -387,6 +400,14 @@ You MUST post a `[DISCUSSION-TRIGGER]` thread now. Include:
 
 Posting this trigger causes the next rotation's agents to enter
 discussion mode via HEARTBEAT Check A2. No monitor invocation needed.
+Immediately after the POST succeeds, set `active_trigger_exists = True`.
+Step 0.2b below runs in the same invocation and must not post a second trigger
+from the stale pre-POST value.
+
+If the latest round concluded with a linked `[SYSTEM-EXHAUSTED]`, do not
+immediately post the same trigger again from unchanged evidence. Return to
+execution/meta-improvement and wait until at least one new experiment result or
+one genuinely new unqueued axis exists after that conclusion.
 
 **If `trigger_conditions` is True AND an active trigger already exists:**
 Proceed normally — the trigger will be picked up by HEARTBEAT in the
@@ -480,16 +501,17 @@ KEEP-count predicate alone cannot distinguish "we're searching well
 but the optimum is here" from "we've collapsed to a single axis-class
 and need to widen the search."
 
-### Step 0.25 — Team Formation / Reform (Last Analyst Only) — RUNS ON THE HEARTBEAT PART 2 (DISCUSSION) BRANCH — REQUIRED
+### Step 0.25 — Team Formation / Reform (Designated Analyst Only) — RUNS ON THE HEARTBEAT PART 2 (DISCUSSION) BRANCH — REQUIRED
 
 **Where you are.** This step executes when the Mode Selector routed you to
 **Part 2 (Discussion)**, not Part 4 — HEARTBEAT § 2b3 sends you here. It is
-written in this file because the analyst owns it; it is the **only** writer of
-`teams/roster.md` anywhere in the system. The monitor does not do this, and the
-orchestrator does not do this.
+written in this file because the analyst owns it; it is the **only
+discussion-branch formation/reform** writer of `teams/roster.md`. Analyst Step
+1d.5 separately enacts an endorsed merge. The monitor and orchestrator never
+write this file.
 
-Run it if MODE=discussion, you are the **alphabetically last analyst name that
-has run in this rotation**, and either:
+Run it if MODE=discussion, you are the **lexicographically last registered
+analyst identity** under `agents/`, and either:
 
 - **Cold start:** `teams/roster.md` is absent or its `teams` map is empty. An
   empty roster IS the trigger — the `DISCUSS_QUORUM` precondition below does
@@ -499,14 +521,18 @@ has run in this rotation**, and either:
   distinct falsifiable predictions is the target, two is acceptable if the round
   was thin.
 - **Mid-run reform:** teams already exist AND the active `[DISCUSSION-TRIGGER]`
-  has reached the roster-scaled `DISCUSS_QUORUM` of `[DISCUSS-DONE]` comments (`max(2, ceil(non_monitor_agents / 2))` — convergence reached), or the roster is already committed.
+  has reached the roster-scaled `DISCUSS_QUORUM` of `[DISCUSS-DONE]` comments
+  (`max(2, ceil(non_monitor_agents / 2))` — convergence reached). If the roster
+  already reflects that reform, skip only the redundant roster PUT; still post
+  the linked `[TEAM-REFORMED]` resolution so the trigger is closed.
 
 You are the designated team reformer. Form or re-form teams based on the
 consensus that emerged from discussion:
 
 ```python
 # Read all [HYPOTHESIS-*] and ranked proposals in the recent workshop
-# to identify 3 hypotheses with distinct falsifiable predictions.
+# to identify 2–3 viable hypotheses with distinct falsifiable predictions,
+# subject to the >=2 CPU-eval members per team constraint below.
 # Write new teams/roster.md to main workspace.
 new_roster = {
     "teams": {
@@ -517,7 +543,7 @@ new_roster = {
             "workspace_id": existing_or_new_ws_id,
             "members": rebalanced_agents,
         },
-        # ... two more teams
+        # ... one or two more viable teams
     },
     "phase": "executing",
 }
@@ -543,14 +569,23 @@ if _starved:
 
 put_main_workspace_file("teams/roster.md", yaml_dump(new_roster))
 
-# Post [TEAM-REFORMED] announcing new assignments, notifying all 9 agents.
+# Post [TEAM-REFORMED] announcing new assignments and notify every currently
+# registered non-monitor identity. Include the active [DISCUSSION-TRIGGER] id
+# in the body so HEARTBEAT Check A2 can recognize that this round is resolved.
 ```
 
 This ends the discussion round — next rotation proceeds in execute
 mode with the new team structure. Monitor is NOT required.
 
-If you are not the alphabetically last analyst who has run, skip this
-step; the last one will handle it.
+This ownership depends only on the registered analyst names, never on completion
+timing. At cold start all non-monitor identities run in one parallel wave. If
+you are the designated analyst, do not execute the roster PUT until every
+registered non-monitor identity has posted its substantive discussion
+contribution and its `[DISCUSS-MORE]` or `[DISCUSS-DONE]` vote on the active
+trigger; re-read the thread while peers finish. Then form teams from the
+complete evidence without waiting for the mid-run DONE quorum. If you are not
+the designated identity, skip only this roster-write step; perform every other
+required discussion action normally.
 
 **Cold-axis mandate on team reform.** When you reform teams, each new
 team's initial queue MUST include ≥1 COLD axis — an axis with zero
@@ -559,9 +594,13 @@ discussion-triggered reform, teams usually inherit the same exhausted
 axis space under renamed hypotheses, producing more DISCARDs. A cold
 axis is a genuinely new test. Before writing the new roster, walk
 `knowledge/unqueued_axes.md` and verify each team gets at least one
-entry marked `status: unqueued` assigned to its queue. If fewer than
-3 cold axes remain in the ledger, post a `[SYSTEM-EXHAUSTED]` thread
-instead of reforming — the search space is genuinely closed.
+entry marked `status: unqueued` assigned to its queue. If fewer cold axes
+remain than the number of teams you can viably form, reduce the team count
+subject to the two-team and two-CPU-members-per-team minima. If even two cold
+axes do not remain, keep the current roster and post `[SYSTEM-EXHAUSTED]`
+instead of reforming. Include the active trigger id in the post body so it
+concludes this discussion round; return to execution/meta-improvement and do
+not repeat the same exhaustion trigger until new result or axis evidence lands.
 
 **The cold-axis mandate does not apply at cold start.** On the first formation
 (empty roster) every axis is cold and the ledger may not exist yet — seed each
@@ -1078,18 +1117,17 @@ because of a race, enact the older one and note the duplicate in a comment):
 1. The bar above is met.
 2. teams/roster.md still reflects pre-merge state.
 3. You are NOT the proposer of this merge thread.
-4. You are the alphabetically last analyst running THIS CURRENT
-   rotation (compare `AGENT_NAME` against the names of every other
-   analyst whose session_count incremented today; if you're the last
-   one, you're it).
+4. Sort the registered analyst-directory names, remove the proposal
+   author, and select the last remaining identity. You are that identity.
+   Do not use completion timing or session counters.
 
 You do NOT need to be a member of the dissolving team. Affectedness
 applies to who-can-endorse, not who-can-enact. A non-affected analyst
 can and should enact — that prevents the dissolving team's analysts
 from being unable to discharge their own merge.
 
-**Do not defer.** Phrases like "the alphabetically-last-analyst rule
-applies to next rotation" or "I'm non-affected so I'll skip" are bugs.
+**Do not defer.** Phrases like "the designated-analyst rule applies to
+next rotation" or "I'm non-affected so I'll skip" are bugs.
 If conditions 1-4 hold THIS cycle, enactment is mandatory THIS cycle.
 A pending merge wastes one eval slot per rotation it remains unenacted.
 
@@ -1128,15 +1166,14 @@ requests.post(f"{API}/posts", headers=HEADERS, json={
 #    a stale launch sees the dissolution and routes to the new team.
 ```
 
-**If conditions 3 or 4 fail** (you are the proposer, OR another analyst
-is alphabetically last in this rotation), skip — the next eligible
-analyst will enact. **If condition 1 or 2 fails** (bar not met, or
-roster already reflects merge), the step is a no-op.
+**If conditions 3 or 4 fail** (you are the proposer, OR another
+non-proposer analyst is the deterministic owner), skip — that owner
+will enact. **If condition 1 or 2 fails** (bar not met, or roster
+already reflects merge), the step is a no-op.
 
-**Why the alphabetically-last rule:** prevents two analysts from racing
-to rewrite the same roster.md (If-Match would catch it but produces
-spurious 409 noise and unclear ownership). Same arbitration rule as
-Step 0.25 cold-start bootstrap.
+**Why the deterministic-owner rule:** it prevents two analysts from
+racing to rewrite roster.md without inspecting timing-dependent
+session state. Excluding the proposer preserves independent enactment.
 
 **Why:** this breaks a deadlock where neither the affected nor the non-affected
 analysts enact the merge — so the enactor is explicitly NOT required to be affected.
@@ -2221,7 +2258,7 @@ file past its budget, compress the older entries instead of growing it.
 
 **Team workspace:** Can create and update any file (queue, dead_ends, strategy, analysis docs, etc.)
 **Main workspace:** Read-only EXCEPT for exactly two paths, both written with read-modify-PUT + If-Match:
-- `teams/roster.md` — Step 0.25 (formation / reform) and Step 1d.5 (merge enactment), alphabetically-last analyst only.
+- `teams/roster.md` — Step 0.25 (formation / reform) and Step 1d.5 (merge enactment), only by the deterministic analyst owner each step defines.
 - `knowledge/unqueued_axes.md` — the shared discussion-backlog ledger (Step 0.7).
 
 Everything else in the main workspace is read-only to you. In particular: never write `results/*.md`, never write `champion.md`, never touch `champion/algo.py` — CPU-eval agents own results and champion updates.

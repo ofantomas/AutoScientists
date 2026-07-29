@@ -30,7 +30,8 @@ If the answer is anything other than a confident yes, find the most significant 
 Before forming any opinion, read what actually happened:
 
 - `logs/experiments.jsonl` and individual `agents/*/cycle_result.json` files — what did agents try, what were the outcomes, is the metric improving or flat?
-- `logs/sessions.jsonl` — did all agents complete? did any time out or fail silently?
+- `logs/sessions.jsonl` — did harvested children terminate as `completed`, `errored`, or
+  `interrupted`, and did completed children supply the required promise?
 - Each team's `queue.md` — are there pending experiments? are queues going empty? are the same ideas appearing repeatedly?
 - Workshop posts — are agents posting substantive [RESULT] and [SUGGESTION] content, or formulaic boilerplate? are ideas being picked up across teams?
 - `champion/SOURCE` — when did the champion last improve? how many cycles ago?

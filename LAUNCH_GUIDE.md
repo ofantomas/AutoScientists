@@ -433,8 +433,8 @@ ssh <host> 'tail -n 20 <opt_problem-checkout>/logs_validate/*.log'   # no repeat
 Back on the **coordinator**, from the template dir on the desired branch, with ClawInstitute running
 (Part A) and the eval pool live (Part B).
 
-**Run the orchestrator as one long-lived, persisted `codex exec` session that you keep open and
-watch.** Give it one prompt:
+**Run the orchestrator as one long-lived, persisted, detached `codex exec`
+session.** Launch it from a shell, not from Codex Desktop:
 
 ```bash
 cd <your-checkout>/autoscientists
@@ -443,29 +443,47 @@ cd <your-checkout>/autoscientists
 codex debug models | python3 -c \
   'import json,sys; m=next(x for x in json.load(sys.stdin)["models"] if x["slug"]=="gpt-5.6-sol"); assert "xhigh" in {r["effort"] for r in m["supported_reasoning_levels"]}; print(m["slug"], "xhigh")'
 
-codex exec \
+AS_RUN_NAME=<run-name>
+AS_ORCH_LOG_DIR="../${AS_RUN_NAME}_codex"
+mkdir -p "$AS_ORCH_LOG_DIR"
+
+nohup codex exec \
   --dangerously-bypass-approvals-and-sandbox \
+  -C "$PWD" \
   -m gpt-5.6-sol \
   -c 'model_reasoning_effort="xhigh"' \
+  --enable multi_agent \
   -c 'agents.default_subagent_model="gpt-5.6-sol"' \
   -c 'agents.default_subagent_reasoning_effort="xhigh"' \
   -c agents.max_concurrent_threads_per_session=10 \
-  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: <run-name>. Use fresh native Codex subagents only for the materialized roster."
+  --json \
+  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: ${AS_RUN_NAME}. Use fresh native Codex subagents only for the materialized roster." \
+  >"$AS_ORCH_LOG_DIR/events.jsonl" \
+  2>"$AS_ORCH_LOG_DIR/stderr.log" </dev/null &
+echo $! >"$AS_ORCH_LOG_DIR/pid"
 ```
 
-It loops open-ended until you `Ctrl+C`. Record the session ID printed by `codex exec`. If the
-process ends or dies, continue that exact session:
+This is non-interactive and fully detached: it does not create a Codex Desktop
+task and it cannot pause for approvals. The first `thread.started` JSON event
+contains the exact session ID. Save that ID. If the process ends or dies,
+continue that exact session from the same checkout:
 
 ```bash
-codex exec resume \
+SESSION_ID=<thread_id-from-events.jsonl>
+nohup codex exec resume \
   --dangerously-bypass-approvals-and-sandbox \
   -m gpt-5.6-sol \
   -c 'model_reasoning_effort="xhigh"' \
+  --enable multi_agent \
   -c 'agents.default_subagent_model="gpt-5.6-sol"' \
   -c 'agents.default_subagent_reasoning_effort="xhigh"' \
   -c agents.max_concurrent_threads_per_session=10 \
-  <SESSION_ID> \
-  "Continue the existing open-ended runbook loop from persisted run state. Do not restart or reseed."
+  --json \
+  "$SESSION_ID" \
+  "Continue the existing open-ended runbook loop from persisted run state. Do not restart or reseed." \
+  >"$AS_ORCH_LOG_DIR/events.resume.jsonl" \
+  2>"$AS_ORCH_LOG_DIR/stderr.resume.log" </dev/null &
+echo $! >"$AS_ORCH_LOG_DIR/pid"
 ```
 
 Do not start a fresh `codex exec` after a crash and do not use `--last`; resume the recorded ID.
@@ -487,13 +505,13 @@ What happens:
    ClawInstitute — `1 monitor + 6 cpu-eval + 3 analysts` (`<prefix>_monitor`, `<prefix>_cpu1..6`,
    `<prefix>_analyst1..3`) — writing each agent's `credentials.json` + `HEARTBEAT.md`, and creates the
    workshop + main workspace.
-3. The orchestrator then forms teams, seeds one proposal per team, and begins the cycle loop:
+3. The orchestrator then forms teams, seeds at least two proposals per team, and begins the cycle loop:
    dispatch analysts (propose) + CPU-eval agents (claim → `scp` candidate to the eval head → `ssh`
    `eval_candidate.py --split train` → parse JSON → record). A train improvement (≥ 1e-4) is only
    **provisional**: the *same, frozen* candidate is then re-scored with `--split test`, and the
    champion advances only if the test score also improves (> 1e-4) **and** the test run is valid
    (see [Part E](#part-e--monitor-a-running-run)). Then health/stagnation checks. It runs
-   **open-ended** until you Ctrl+C.
+   **open-ended** until you explicitly stop the detached process.
 
 > Re-read the [parameters note](#deployment-parameters-set-these-first): the agents take the eval
 > target from `system/templates/ROLE-CPU.md`. Confirm those values match `$EVAL_HOST` /
@@ -616,9 +634,8 @@ c=collections.Counter(json.loads(l).get('outcome') for l in open('$RUN/logs/expe
 print(dict(c))
 "
 
-# Sessions + run-local native child completion artifacts
+# Compact native child session records
 tail -f $RUN/logs/sessions.jsonl
-ls      $RUN/logs/raw/
 
 # Agents' shared brain (ClawInstitute): proposals, results, discussion
 curl -s -H "Authorization: Bearer $CLAWINSTITUTE_TOKEN" \
@@ -663,7 +680,8 @@ space is exhausted. Re-run the Part B preflight rather than reading anything int
 ## Part F — Stop & clean up
 
 ```bash
-# 1. Stop the orchestrator: Ctrl+C in the long-lived `codex exec` process (open-ended; only you stop it).
+# 1. Stop the detached orchestrator explicitly (open-ended; only you stop it).
+kill "$(cat "$AS_ORCH_LOG_DIR/pid")"
 #    That is the ONLY teardown this run performs.
 
 # 2. Eval plane: DO NOTHING. The pool, its Redis, and its workers are shared and pre-existing.
@@ -690,7 +708,7 @@ cleanup between runs.
 | **ALL cpu agents hanging on eval** | Wrong Redis port (`6390` is dead — it must be **6385**) or the pool is down → run the **Part B preflight** (B2–B4). Fix `EVAL_REDIS_PORT` in `system/templates/ROLE-CPU.md` **before** launch; a running run's agents have it baked into their `HEARTBEAT.md`. |
 | **Every candidate comes back `REJECTED_TEST`** | Either the test anchor is mis-seeded (a `test_metric_value` seeded from something better than the real baseline makes (b) unreachable — compare it against the Part B6 baseline test score) or the deployed TEST metadata doesn't match (expected SHA `8a1b4708...`, 250 molecules). Also check the corrected `validate.py` is deployed (SHA `e968f6db...`). |
 | **`champion.md` advances but `champion/algo.py` keeps the seed md5** | Step 7b1 propagation failed — the champion record moved without the code. The recorded champion is now a lie. Compare `md5 $RUN/champion/algo.py` against the seed and against the promoted `exp_id`'s candidate; stop and reconcile before more cycles. |
-| **`logs/experiments.jsonl` stays empty** | The ledger writer hook never fired (the orchestrator writes this file, not the agents) → confirm the orchestrator is past step 5 and that `$RUN/logs/` exists and is writable; inspect the matching `logs/raw/*.json` completion artifact and, when needed, the full native child transcript attached to the parent Codex session. |
+| **`logs/experiments.jsonl` stays empty** | The ledger writer hook never fired (the orchestrator writes this file, not the agents) → confirm the orchestrator is past step 5 and that `$RUN/logs/` exists and is writable; inspect the matching `sessions.jsonl` row and, when needed, the full native child transcript attached to the persisted parent Codex session. |
 | Candidate scores `is_valid=0` unexpectedly | Wrong `validate.py` in `$SELLA_CHECKOUT`, or stale `molecules/train_XTB.json` / `test_XTB.json` there → re-run the validator SHA check and B5. |
 | Evals fail with connection refused | Eval target mismatch between `ROLE-CPU.md` and the live pool → align `EVAL_HOST` / `EVAL_REDIS_HOST` / `EVAL_REDIS_PORT` (Deployment parameters + Part D note). |
 | **Eval returns in ~2.6 s with `num_errors=250`**, `No such file or directory: .../molecules/xyz/<mol>_mm.xyz` | `--molecules-dir` was omitted (or points at a path the workers don't have) → always pass `--molecules-dir $EVAL_MOLECULES_DIR` (see B5). |
@@ -713,14 +731,20 @@ curl -sf http://localhost:3000/api/v1/workshops -o /dev/null && echo "clawinstit
 export CLAWINSTITUTE_TOKEN=<token>
 cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requirements.txt
 codex debug models | python3 -c 'import json,sys; m=next(x for x in json.load(sys.stdin)["models"] if x["slug"]=="gpt-5.6-sol"); assert "xhigh" in {r["effort"] for r in m["supported_reasoning_levels"]}; print(m["slug"], "xhigh")'
-codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol \
+AS_RUN_NAME=<run-name>   # <=16 chars, unused name
+AS_ORCH_LOG_DIR="../${AS_RUN_NAME}_codex"
+mkdir -p "$AS_ORCH_LOG_DIR"
+nohup codex exec --dangerously-bypass-approvals-and-sandbox -C "$PWD" -m gpt-5.6-sol \
   -c 'model_reasoning_effort="xhigh"' \
+  --enable multi_agent \
   -c 'agents.default_subagent_model="gpt-5.6-sol"' \
   -c 'agents.default_subagent_reasoning_effort="xhigh"' \
   -c agents.max_concurrent_threads_per_session=10 \
-  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: <run-name>. Use fresh native Codex subagents only for the materialized roster."   # <=16 chars, unused name
-# After interruption, repeat the same flags with:
-# codex exec resume ... <SESSION_ID> "Continue the existing run; do not restart or reseed."
+  --json \
+  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: ${AS_RUN_NAME}. Use fresh native Codex subagents only for the materialized roster." \
+  >"$AS_ORCH_LOG_DIR/events.jsonl" 2>"$AS_ORCH_LOG_DIR/stderr.log" </dev/null &
+echo $! >"$AS_ORCH_LOG_DIR/pid"
+# After interruption, manually resume the thread.started ID with the detached Part D command.
 
 # EVAL PLANE — SHARED, ALREADY RUNNING. Deploy this run's client files, then PREFLIGHT (read-only).
 scp task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"   # branch-matching
