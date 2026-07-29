@@ -201,6 +201,8 @@ for agent_name in non_admin_agents:
             f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
             f"You MUST start at Part 0 (Mode Selector). Do not skip ahead.\n"
             f"Do not spawn additional subagents; execute this roster role yourself.\n"
+            f"When done, return the branch-qualified promise required by HEARTBEAT Part 6e "
+            f"in your final response; command output alone does not count.\n"
             f"{extra_discussion_instructions}"   # from the profile hook
         ),
         fork_turns="none",
@@ -208,11 +210,16 @@ for agent_name in non_admin_agents:
 ```
 
 **Formation barrier:** apply the wait/list protocol to every retained
-`discussion_children` target and do not enter Step 4 until every child completed
-successfully and returned its required branch-qualified promise. An
+`discussion_children` target and do not enter Step 4 until every child has native
+terminal status `completed`. Every child is still required to return its
+branch-qualified promise. If a completed child omits only that final marker,
+record a protocol warning but do not terminate the open-ended run for that
+formatting error alone. Step 4's roster verification remains the durable
+formation barrier: the designated analyst's role permits the roster write only
+after every registered non-monitor identity has contributed and voted. An
 `errored`/`interrupted` child is not a completed scientific contribution. Stop
-and report that exact child rather than pretending the discussion wave
-finished. The parent does not choose or relaunch a roster writer.
+and report that exact child rather than pretending the discussion wave finished.
+The parent does not choose or relaunch a roster writer.
 
 > **Model choice.** The orchestrator is launched with `-m gpt-5.6-sol`. The launch command also
 > sets `agents.default_subagent_model="gpt-5.6-sol"`, and every `spawn_agent` call leaves
