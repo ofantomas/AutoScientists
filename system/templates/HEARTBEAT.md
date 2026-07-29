@@ -395,7 +395,7 @@ your own authority.
 ```python
 # Needs HEADERS / API / ALL_TEAM_WS_IDS / MY_TEAM / MY_ROLE / parse_frontmatter — all bound in
 # Part 0 (Check A0 and Check B), along with `requests` and `yaml`.
-REVIEW_CAP   = 2                  # CEILING on reviews owed per spawn — never a quota to fill
+REVIEW_CAP   = 1                  # CEILING on reviews owed per spawn — never a quota to fill
 REVIEW_OK    = "[REVIEW-OK]"      # the two exact tags. Nothing else is a review: do not invent
 REVIEW_BLOCK = "[REVIEW-BLOCK]"   # variants, and do not lead a review with any other marker.
 

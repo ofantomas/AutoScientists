@@ -94,12 +94,20 @@ def main() -> int:
         score["duration_s"] = time.time() - start
         score["num_results"] = len(result["results"])
         score["num_errors"] = result["num_errors"]
-        # Per-molecule summary intentionally DISABLED for this run: the agent sees only the
-        # aggregate score (parity with the canonical autoresearch / ProteinGym coarseness, and a
-        # test of whether per-molecule guidance actually helped or just funnelled the swarm onto
-        # the single stiff molecule). Re-enable by uncommenting; per_molecule_summary() is kept above.
-        # if result["results"]:
-        #     score["per_molecule"] = per_molecule_summary(result["results"])
+        # Per-molecule summary is ENABLED for EVERY evaluation, valid or not — especially not.
+        #
+        # It was disabled to test whether per-molecule guidance helped or just funnelled the swarm
+        # onto the single stiffest molecule. The answer, measured: without it an invalid run returns
+        # a bare 1000.0 sentinel and NOTHING else, so a bold structural change that breaks
+        # convergence on three molecules is indistinguishable from one that breaks everything, and
+        # from a harness error. That is zero gradient on exactly the experiments worth learning
+        # from, and a search that cannot tell those apart retreats to safe parameter tweaks.
+        #
+        # `result["results"]` is populated even when score_results() bailed early (non-convergence,
+        # over-budget, or a partial set after a per-molecule error), so this fires for the invalid
+        # runs that need it most. Only a total harness failure leaves it empty.
+        if result["results"]:
+            score["per_molecule"] = per_molecule_summary(result["results"])
     except Exception as exc:  # surface harness/Redis failures as machine-readable JSON
         print(json.dumps({
             "fitness": 1000.0,

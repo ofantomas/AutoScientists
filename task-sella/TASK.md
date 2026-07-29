@@ -66,7 +66,13 @@ the force-call budget. Validity is carried by `is_valid`, never inferred from th
 
 ## How a candidate is scored
 Each candidate `algo.py` is evaluated on a fixed molecule set; the evaluator returns `fitness`,
-`is_valid`, `mean_rel_steps`, `mean_rel_energy`, and `max_final_energy_delta_kcal_mol`. There are two
+`is_valid`, `mean_rel_steps`, `mean_rel_energy`, `max_final_energy_delta_kcal_mol`, and a
+**`per_molecule` breakdown** — `worst_by_rel_steps` (where the step budget goes),
+`nearest_energy_gate` (the most under-relaxed molecules), and `non_converged` (which molecules never
+converged). **`per_molecule` is returned for every evaluation that produced any result, including
+invalid ones**, so a run that failed still tells you *which* molecules failed and why. Use it: a
+change that breaks 3 molecules and one that breaks all of them score identically in the aggregate.
+There are two
 fixed splits: **train** (the default) and a **held-out test** split nothing has ever been tuned on. A
 result on either split counts only if it is **valid**; a lower train `fitness` alone is *not* enough to
 promote a candidate — see the promotion contract below.

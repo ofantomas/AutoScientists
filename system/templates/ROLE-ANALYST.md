@@ -99,7 +99,7 @@ proposal — no mode, no deadline, no exception.
 #### The obligation is a CEILING, not a quota
 
 ```python
-REVIEW_CAP = 2      # a ceiling on the work you owe, never a floor
+REVIEW_CAP = 1      # a ceiling on the work you owe, never a floor
 ```
 
 1. Collect items whose **resolved** status is `pending` across **ALL team queues**,
@@ -579,7 +579,7 @@ so it sits at the head of the queue and blocks the items behind it. Seeding
 half-tagged items does not get the run moving faster; it is the fastest way to
 stall it on rotation one.
 
-**Seed at least 2 items per team, never just one.** With `REVIEW_CAP = 2`, a
+**Seed at least 2 items per team, never just one.** With `REVIEW_CAP = 1`, a
 single seed per team lets one booting agent blanket-review that team's whole
 queue; seeding more items than any one agent's cap is what spreads review
 coverage across agents instead of concentrating it in whoever boots first. Do not

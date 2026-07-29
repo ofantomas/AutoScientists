@@ -72,7 +72,7 @@ healthy. Watch **two consecutive cycles** before concluding anything is wrong.
 Rules:
 1. Skip extended discussion before any evaluation.
 2. Seed-queue minimum, not maximum — but the minimum is **two** proposals per team, not one: the
-   seed count must exceed `REVIEW_CAP` (2 per agent per spawn) so review coverage distributes
+   seed count must exceed `REVIEW_CAP` (1 per agent per spawn) so review coverage distributes
    across the booting agents instead of concentrating in whichever one boots first.
 3. Dispatch the first cpu-eval agent the moment the first queue.md is written (it holds the team's
    full seed set — the PUT is a single write, so it is never observed part-filled).
@@ -117,7 +117,7 @@ rotation. Validate before the PUT and raise instead of writing a partial item �
 drop it either, because invariant 3's floor still has to be met: replace it with a complete seed.
 
 **3. At least TWO items per team — one seed per team does not spread review coverage.**
-The seed count must exceed `REVIEW_CAP` (2 per agent per spawn — HEARTBEAT Part 1 (Boot), § Review
+The seed count must exceed `REVIEW_CAP` (1 per agent per spawn — HEARTBEAT Part 1 (Boot), § Review
 backlog) so review coverage distributes. With one seed per team, a single booting agent's two review
 slots swallow two entire teams' queues, and every agent behind it finds nothing left to review; with
 two or more per team the run-wide seed count sits well above any one agent's cap, so the first
@@ -195,7 +195,7 @@ REQUIRED_ITEM_FIELDS = ("id", "description", "priority", "axis", "direction",
                         "value", "proposal_post", "diff", "review_status", "proposed_at",
                         "proposed_by")
 
-# Cold start seeds AT LEAST this many items per team. The floor must be >= REVIEW_CAP (2 reviews
+# Cold start seeds AT LEAST this many items per team. The floor must exceed REVIEW_CAP (1 review
 # per agent per spawn) so review coverage distributes: with one seed per team a single booting
 # agent's two slots cover two whole teams' queues and the agents behind it have nothing to review.
 # Do not "simplify" this back to 1.

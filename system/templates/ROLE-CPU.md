@@ -92,7 +92,7 @@ place the rest of this file points at when it says "reviewed" — the two must s
 find them disagreeing, follow HEARTBEAT and report the divergence.
 
 ```python
-REVIEW_CAP = 2   # a CEILING on the reviews you owe this SPAWN — never a floor, never a quota
+REVIEW_CAP = 1   # a CEILING on the reviews you owe this SPAWN — never a floor, never a quota
 ```
 
 **If the backlog is empty, post NOTHING.** Zero reviews discharges the obligation in full. Never
@@ -1483,6 +1483,7 @@ The score dict is the authoritative result. Its keys (emitted by `eval_candidate
 | `max_final_energy_delta_kcal_mol` | Worst per-molecule final-energy gap; diagnostic only — does NOT gate validity. |
 | `converged` | Fraction of molecules whose convergence check passed. |
 | `invalid_reason` | Human string when invalid; empty when valid. |
+| `per_molecule` | **Per-molecule breakdown, present on EVERY eval that produced any result — including invalid ones.** `n_molecules`; `worst_by_rel_steps` (the 8 molecules eating the most budget, each with `mol`, `rel_steps`, `n_steps`, `energy_delta_kcal_mol`, `converged`); `nearest_energy_gate` (the 5 most under-relaxed — the validity risk); `non_converged` (names of molecules that never converged). Absent only on a total harness failure. |
 | `duration_s`, `num_results`, `num_errors`, `lower_is_better` | Diagnostics. |
 
 This score is the **train** split only (we pass `--split train` explicitly). A better
@@ -1523,6 +1524,24 @@ Check these from the score dict:
    blew past `max_steps` on at least one molecule. Note which failure mode in the result file. The fix
    is always a better *trajectory* (genuinely relax further in fewer calls) — **never** loosening,
    targeting, or working around the convergence test, which is fixed and external.
+
+   **`per_molecule` is present on every eval that produced any result, invalid ones included — use it,
+   especially when the run failed.** A `fitness` of `1000.0` says only "no usable trajectory"; the
+   aggregate cannot tell you whether a change broke everything or broke three molecules. `per_molecule`
+   can:
+   - `non_converged` names the molecules that never converged. If it is a handful, the mechanism is not
+     dead — it is unguarded for those cases, and the next experiment is the same mechanism with the
+     condition that excludes them (stated on *physical* grounds, never by molecule identity — a branch
+     that recognises which benchmark molecule it is looking at is forbidden; see TASK.md).
+   - `nearest_energy_gate` names the most under-relaxed molecules — where an energy-gate failure is
+     actually coming from, rather than the mean that hides it.
+   - `worst_by_rel_steps` names where the step budget is actually going, which is where a speedup has
+     room to exist at all.
+
+   Report the relevant entries in the result file. A structural change that fails on 3 of 250 molecules
+   and one that fails on 250 are completely different results, and only this field distinguishes them —
+   without it, every bold experiment returns the same uninformative sentinel and the search is pushed
+   toward timid parameter tweaks that always return a number.
 
    **Read the `fitness` of an invalid run — it is real information, not noise.** An energy-invalid run
    still reports its true `mean_rel_steps`, so the pair `(fitness, mean_rel_energy)` separates two very
