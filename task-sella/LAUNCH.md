@@ -184,6 +184,8 @@ seeding is a cold-start path, not a way to put an item into a queue without a re
 from datetime import datetime, timezone
 import re, yaml, requests
 
+FENCE = "`" * 3   # built at runtime so the markdown fence around this block stays intact
+
 # --- REQUIRED item schema. An item that cannot satisfy this is NOT written. ---
 # `review_status` gates claiming, `proposed_at` is the fallback ordering key for the review
 # backlog, and `proposed_by` names the one agent who may NOT review the item: an item missing
@@ -225,7 +227,7 @@ def post_proposal(team_name, team_info, exp):
             f"direction: {exp['direction']}\n"
             f"value: {exp['value']}\n"
             f"current_value: {exp.get('current_value', 'champion default')}\n\n"
-            f"## Diff\n```python\n{exp['diff']}\n```\n\n"
+            f"## Diff\n{FENCE}python\n{exp['diff']}\n{FENCE}\n\n"
             f"## Team\n{team_name}\n\n"
             # Cite the analysis thread HERE — not in the item's proposal_post field.
             f"## Derived from\n{exp.get('derived_from', 'cold-start reading of TASK.md + champion')}"
