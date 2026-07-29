@@ -1203,6 +1203,25 @@ run reports its honest measured `fitness`, so DISCARDs are no longer interchange
 - `fitness == 1000.0` = no usable trajectory (infra error, non-convergence, or blown budget). Infra
   errors are `FAILED`, not `DISCARD`, and never count here at all.
 
+**For a `1000.0` row, read the result file's `per_molecule` section before you count it against the
+axis.** Every evaluation now reports a per-molecule breakdown, invalid runs included, and it changes
+what a failed experiment means:
+- `non_converged` lists a HANDFUL of molecules => the mechanism is **unguarded, not dead**. It works
+  on 247 of 250 and the open question is what those few have in common. Do not treat that as evidence
+  against the mechanism; the right next experiment is the same mechanism with a condition that
+  excludes them, chosen on PHYSICAL grounds (curvature, coordination, ring flexibility, size-scaled
+  thresholds) and never by recognising which benchmark molecule it is — that is forbidden, see
+  TASK.md. Say so in the queue item so the retry is not mistaken for a rerun of a dead end.
+- `non_converged` lists most or all molecules => the mechanism genuinely breaks the trajectory. An
+  ordinary DISCARD.
+- `nearest_energy_gate` shows WHICH molecules dragged an energy failure down, rather than the mean
+  that hides it; `worst_by_rel_steps` shows where the step budget actually goes, which is the only
+  place a speedup can come from.
+
+Aggregate numbers cannot tell a mechanism that fails on 3 molecules from one that fails on 250. If
+you close an axis on the first kind, you have discarded a working idea on the strength of a summary
+statistic.
+
 Never treat a low `fitness` on an invalid row as a partial win — it did not pass, and it cannot be
 promoted. It is a diagnostic about *where* the mechanism failed, nothing more.
 
