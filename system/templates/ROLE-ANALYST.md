@@ -1452,11 +1452,12 @@ Promotion is **not** train-only. A candidate becomes champion only when all
 three hold (contract in `{FOCUS_ROOT}/task/TASK.md`; CPU-eval agents enforce
 it in ROLE-CPU Step 4c and record the outcome in their Step 5):
 
-- **(a) train** — valid train run AND `current_best_train - our_train >= 1e-3`
+- **(a) train** — valid train run AND `current_best_train - our_train >= 1e-4`
 - **(b) test** — `current_best_test - our_test > 1e-4` on the held-out split
 - **(c) test valid** — the held-out run has `is_valid == 1`
 
-Ties and exact-margin hits are rejects. Propose against this contract, not
+TRAIN ties reject; an exact `1e-4` TRAIN gain is provisionally eligible.
+TEST ties and exact-margin hits reject. Propose against this contract, not
 against train alone: **a mechanism that improves train but under-relaxes on
 unseen molecules is not progress.** If you cannot articulate why a mechanism
 should help molecules the system has never evaluated, it is a weak proposal.

@@ -983,7 +983,7 @@ Promotion requires BOTH anchors to advance together:
 - `test_metric_value` — HELD-OUT TEST fitness, from the same frozen candidate
   re-evaluated with `--split test`.
 
-A candidate is promoted only when (a) train improves by >= 1e-3, (b) test improves
+A candidate is promoted only when (a) train improves by >= 1e-4, (b) test improves
 by > 1e-4 against `test_metric_value`, and (c) the test run has `is_valid == 1`.
 A candidate that improves on train but fails (b) or (c) is `REJECTED_TEST`: its
 mechanism family is recorded in the team's `non_generalizable.md` and abandoned.

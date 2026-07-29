@@ -489,7 +489,7 @@ What happens:
    workshop + main workspace.
 3. The orchestrator then forms teams, seeds one proposal per team, and begins the cycle loop:
    dispatch analysts (propose) + CPU-eval agents (claim → `scp` candidate to the eval head → `ssh`
-   `eval_candidate.py --split train` → parse JSON → record). A train improvement (≥ 1e-3) is only
+   `eval_candidate.py --split train` → parse JSON → record). A train improvement (≥ 1e-4) is only
    **provisional**: the *same, frozen* candidate is then re-scored with `--split test`, and the
    champion advances only if the test score also improves (> 1e-4) **and** the test run is valid
    (see [Part E](#part-e--monitor-a-running-run)). Then health/stagnation checks. It runs
@@ -535,11 +535,12 @@ A candidate becomes champion **only** when all three hold:
 
 | # | Condition | Threshold |
 |---|---|---|
-| a | valid TRAIN run and `current_best_train − our_train ≥ KEEP_MARGIN` | `1e-3` |
+| a | valid TRAIN run and `current_best_train − our_train ≥ KEEP_MARGIN` | `1e-4` |
 | b | `current_best_test − our_test > TEST_MARGIN` | `1e-4` |
 | c | the TEST run has `is_valid == 1` | held-out energy gate |
 
-Ties and exact-margin improvements are **rejects**. The test eval re-scores the *same, already-frozen*
+TRAIN ties reject; an exact `1e-4` TRAIN improvement is provisionally eligible.
+TEST ties and exact-margin improvements reject. The test eval re-scores the *same, already-frozen*
 candidate (same remote path, same `eval_candidate.py`, only `--split test` added — never a re-edit
 between the two), and runs **only** after a provisional train keep, so a train DISCARD never spends a
 test eval. `champion.md` carries **two** anchors — `metric_value` (train) and `test_metric_value` —

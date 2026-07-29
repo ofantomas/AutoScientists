@@ -1126,7 +1126,7 @@ obligation with its own ceiling (`REVIEW_CAP`) — never skip it because you alr
 
 If `keeps_in_last_30 == 0` (read recent results from main workspace), you may switch to Part 2 (Discussion Mode) for this cycle instead of running an experiment. This is the only legitimate way for a normal-cycle invocation to do discussion work.
 
-**The window is 30, not 10, and the switch is capped.** With a `KEEP_MARGIN` of 1e-3 on top of a
+**The window is 30, not 10, and the switch is capped.** With a `KEEP_MARGIN` of 1e-4 on top of a
 held-out test gate, zero KEEPs across 10 experiments is an ordinary plateau, not a stall — firing the
 opt-out there lets a whole rotation produce no experiments at all, which does not even advance the
 stagnation streak. So:
