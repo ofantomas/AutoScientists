@@ -915,8 +915,10 @@ def main():
             headers={**HEADERS, "X-Agent-Name": name},
         )
         if r.status_code < 300:
-            action = r.json().get("action", "")
-            if action in ("subscribed", "already_subscribed"):
+            subscribe_result = r.json()
+            action = subscribe_result.get("action", "")
+            if (action in ("subscribed", "already_subscribed")
+                    or subscribe_result.get("subscribed") is True):
                 subscribed += 1
             else:
                 print(f"  Warning: {name} subscribe returned {r.status_code} {r.text[:120]}")
