@@ -7,20 +7,32 @@ summary is intentionally DISABLED for this run — agents receive ONLY the aggre
 score (fitness / is_valid / mean_rel_steps / max_final_energy_delta), no per-molecule
 breakdown.
 
-Run from the opt_problem repo root (branch ralph-autoresearch-sella-baseline).
+Run from THIS RUN's dedicated client checkout on the eval head
+(/home/tsypin/opt_problem_as_testgate_opus5) — never from the shared workers' repo.
 
-Usage:
-  python eval_candidate.py --program /abs/path/candidate_algo.py \
-      --split train --redis-host localhost --redis-port 6379
+Usage (the exact, canonical command shape — copy it verbatim). `JAX_ENABLE_X64=1`, an explicit
+`--split`, and `--molecules-dir` are all MANDATORY: the client bakes absolute xyz paths into every
+Redis task and the worker opens them on ITS OWN filesystem, so omitting --molecules-dir fails
+250/250 molecules in ~2.6s. The eval Redis is on port 6385 (the old :6390 pool is dead):
+
+  JAX_ENABLE_X64=1 /home/tsypin/miniconda3/envs/gigaopt/bin/python eval_candidate.py \
+      --program /abs/path/candidate_algo.py \
+      --split train \
+      --molecules-dir /home/tsypin/as_testgate_molecules \
+      --redis-host localhost --redis-port 6385
+
+The held-out gate uses the identical command with `--split test` and nothing else changed — the
+candidate is never re-edited between its train and test evals.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
-from validate import Evaluator, score_results, serialize_program_minimize_func
+from validate import REPO_ROOT, Evaluator, score_results, serialize_program_minimize_func
 from distributed_validate.optimizer import normalize_optimizer_spec
 
 
@@ -51,6 +63,16 @@ def main() -> int:
     parser.add_argument("--split", choices=["train", "test"], default="train")
     parser.add_argument("--redis-host", default="localhost")
     parser.add_argument("--redis-port", type=int, default=6379)
+    # The client bakes ABSOLUTE xyz paths into every Redis task; the worker opens that path
+    # on ITS OWN filesystem. On a shared multi-host pool the workers do not have this
+    # checkout, so molecules_dir MUST point at a directory that exists on every worker host.
+    # Defaults to $AS_MOLECULES_DIR, else this repo's molecules/ (correct only when the
+    # workers run from this same path).
+    parser.add_argument(
+        "--molecules-dir",
+        default=os.environ.get("AS_MOLECULES_DIR") or str(REPO_ROOT / "molecules"),
+        help="Molecules dir as seen BY THE WORKERS (absolute path, must exist on every worker host)",
+    )
     args = parser.parse_args()
 
     # Serialize the candidate's minimize_func (raises if minimize_func is missing/not callable).
@@ -64,6 +86,7 @@ def main() -> int:
             split=args.split,
             redis_host=args.redis_host,
             redis_port=args.redis_port,
+            molecules_dir=args.molecules_dir,
         )
         start = time.time()
         result = evaluator.evaluate(optimizer_spec)

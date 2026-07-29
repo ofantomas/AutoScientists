@@ -19,7 +19,7 @@ import jax.numpy as jnp
 from jax import jit, grad, jacfwd, jacrev, custom_jvp, vmap, jvp, device_get
 
 _NM_TO_ANG = 10.0
-_KJ_MOL_TO_EV = 1.0 / 96.48530749925793
+_KJ_MOL_TO_EV = 1.0 / 96.4853321233100184
 _KJ_MOL_NM_TO_EV_ANG = _KJ_MOL_TO_EV / _NM_TO_ANG
 _cache_dir = os.path.expanduser("~/.cache/sella/jax_cache")
 os.makedirs(_cache_dir, exist_ok=True)

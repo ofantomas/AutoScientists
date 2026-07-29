@@ -4,12 +4,18 @@ This guide takes a **new operator** from nothing to a running AutoScientists (AS
 molecular-geometry optimizer (`algo.py`), end to end: the ClawInstitute coordination server, the xTB
 evaluation pool (Redis + distributed workers + tunnels), and the orchestrator launch.
 
-**This guide is host-agnostic.** It never hardcodes machine names or worker/host counts — *you* supply
-those in the [Deployment parameters](#deployment-parameters-set-these-first) block below, and every
-command references them. Pick your hosts and pool size to match your cluster and the run's needs.
+**The evaluation plane for this run already exists and is SHARED.** You do **not** start Redis, you do
+**not** start workers, and you do **not** touch `/home/tsypin/opt_problem_optbench`. Other clients are
+on the same pool; flushing Redis or restarting workers destroys their in-flight evals. Your eval-plane
+job is a **read-only preflight** ([Part B](#part-b--eval-plane-preflight-read-only)) plus deploying
+this run's **dedicated client checkout**.
 
-> If you only want to *add a worker host* to an already-running pool, skip to
-> [Part C](#part-c--scale-out-remote-worker-hosts-optional) or use the `setup-xtb-worker-host` skill.
+The concrete values for this run are pinned in
+[Deployment parameters](#deployment-parameters-set-these-first); every command references them.
+
+> Standing up your **own private** pool instead (not this run)? See the
+> [Appendix](#part-c--appendix--standing-up-your-own-private-pool-not-this-run) or the
+> `setup-xtb-worker-host` skill.
 
 ---
 
@@ -45,48 +51,120 @@ network in exactly two ways: the orchestrator launches Claude Code subagents, an
   workers**, and `eval_candidate.py`. A CPU-eval agent scores a candidate by `scp`-ing `algo.py` to
   the eval head and running `eval_candidate.py`, which enqueues the per-molecule tasks to Redis; the
   worker pool computes them; the JSON score comes back on stdout. Evaluation is **deterministic**.
-- Optionally, **extra worker hosts** add capacity by running more workers that connect to the eval
-  head's Redis over an SSH tunnel.
+- **Extra worker hosts** add capacity by running workers that connect to the eval head's Redis over an
+  SSH tunnel. For this run there are **four** of them (192 workers total), already running.
 
 The coordinator and eval head **may be the same machine or two separate machines** — the planes are
-decoupled. You choose, via the parameters below.
+decoupled. For this run the coordinator is your laptop and the eval head is `cpu-33`.
+
+> **The evaluation plane is shared, long-lived infrastructure.** It was not started by this run and
+> must not be stopped, flushed, or reconfigured by it. Everything you run against it in Parts B and F
+> is read-only.
 
 ---
 
 ## Deployment parameters (set these first)
 
-Decide your topology and pool size, then export these in every shell where you run the commands
-below. None of them are baked into this guide — they are *your* choices for *this* launch.
+These are the **live** values for this run (pool verified up and idle 2026-07-27 13:22 MSK). Export
+them in every shell where you run the commands below.
 
 ```bash
 # --- Coordination plane ---
-COORD_HOST=<coordinator-host>     # runs ClawInstitute + the claude orchestrator + the 10 subagents
+COORD_HOST=<your-laptop>          # runs ClawInstitute + the claude orchestrator + the 10 subagents
 
-# --- Evaluation plane (must agree with system/templates/ROLE-CPU.md — see note) ---
-EVAL_HOST=<eval-head-host>        # ssh target that runs Redis + workers + eval_candidate.py
-                                  #   (may be the same as COORD_HOST)
-REDIS_PORT=<eval-redis-port>      # port of the eval Redis on EVAL_HOST
-SELLA_CHECKOUT=<path-on-eval>     # opt_problem sella checkout on EVAL_HOST (eval_candidate.py at root)
-EVAL_PYTHON=<python-on-eval>      # python from the gigaopt env on EVAL_HOST
-
-# --- Pool size (your call — size to host cores and how fast you want evals) ---
-NUM_WORKERS=<workers-per-host>    # worker processes to run on each pool host
-WORKER_HOSTS="<host> <host> ..."  # OPTIONAL extra worker hosts besides EVAL_HOST (space-separated;
-                                  #   leave empty to run workers only on EVAL_HOST)
+# --- Evaluation plane (SHARED; must agree with system/templates/ROLE-CPU.md — see note) ---
+EVAL_HOST=cpu-33                  # ssh alias for a002dc-0002: Redis head + eval_candidate.py
+REDIS_HOST=localhost              # Redis host *as seen from the eval head*
+REDIS_PORT=6385                   # eval Redis on a002dc-0002 (the old :6390 pool is DEAD)
+SELLA_CHECKOUT=/home/tsypin/opt_problem_as_testgate_opus5   # THIS RUN's dedicated client checkout
+EVAL_PYTHON=/home/tsypin/miniconda3/envs/gigaopt/bin/python
+EVAL_MOLECULES_DIR=/home/tsypin/as_testgate_molecules   # MANDATORY on every eval command
 ```
 
+> **Why `--molecules-dir` is mandatory on every eval command.** The client bakes **absolute** xyz
+> paths into every Redis task, and the worker opens that path on **its own** filesystem. The worker
+> hosts do not have `$SELLA_CHECKOUT`, so omitting the flag fails **250/250** molecules in ~2.6 s with
+> `No such file or directory: .../molecules/xyz/<mol>_mm.xyz`. `$EVAL_MOLECULES_DIR` exists on all
+> four worker hosts and its TRAIN/TEST metadata SHAs match the pool (`9ec64608…` / `8a1b4708…`,
+> 250 molecules each). Read-only use of that directory is exactly what it is for.
+>
+> **What lives in `/home/tsypin/as_testgate_molecules`:** this run's **regenerated** split metadata —
+> `train_XTB.json` and `test_XTB.json` (250 molecules each), plus an `xyz` **symlink** into the
+> workers' repo geometries. The metadata was regenerated against this exact worker/`algo.py` pair, so
+> the baseline is exactly self-consistent: the unmodified baseline `algo.py` reproduces the split
+> metadata exactly, scoring **1.000000** on both splits (see B5/B6). **This path must
+> exist, with identical contents, on every worker host as well as the eval head**, and that is
+> precisely why `--molecules-dir` is mandatory on every eval command: it is the only way the worker
+> resolves geometries and the only way it scores against the regenerated baseline.
+
+**Worker pool (already running — do not start, stop, or reconfigure):**
+
+| Host (alias → real) | Workers | Reaches the head via |
+|---|---|---|
+| `cpu-220` → a002dc-0004 (\*) | 48 | host-local `localhost:6389` SSH tunnel → `a002dc-0002:6385` |
+| `cpu-217` → a002dc-0005 | 48 | same |
+| `cpu-128` → a002dc-0006 | 48 | same |
+| `cpu-149` → a002dc-0007 | 48 | same |
+| **total** | **192** | |
+
+(\*) `cpu-220` (a002dc-0004) **also hosts a second, unrelated 48-worker pool** belonging to another user
+on a different Redis port. Its 48 workers therefore share the box with someone else's 48 and its
+effective throughput for our pool is lower than the other three hosts. **This is expected, not a
+fault** — do not "fix" it, and do not touch the other pool.
+
+Worker configuration (fixed, for reference only): xTB/GFN2, **one thread per worker**,
+`JAX_ENABLE_X64=1`, `--max-tasks 50`, `--task-timeout 600`, `--max-rss-gb 16`, python
+`/home/tsypin/miniconda3/envs/gigaopt/bin/python`, repo `/home/tsypin/opt_problem_optbench`.
+Worker SHA `35af7756...`; TRAIN metadata SHA `9ec64608...`, TEST metadata SHA `8a1b4708...`,
+250 molecules each.
+
+> ⚠️ **`/home/tsypin/opt_problem_optbench` is the WORKERS' repo and is shared.** Never edit, redeploy,
+> or `git`-operate in it, and never restart the workers that run from it. Your run's files go in
+> `$SELLA_CHECKOUT` only.
+
 > **Keep these in sync with the agents' contract.** The CPU-eval agents read the eval target from
-> `system/templates/ROLE-CPU.md` (`EVAL_HOST`, `EVAL_REDIS_PORT`, `SELLA_CHECKOUT`, `EVAL_PYTHON`).
-> Read the committed values and make your parameters match them — or edit the template **before
-> launch** so they match your hosts (it is injected into every agent's `HEARTBEAT.md` at launch;
-> editing a per-run copy afterward won't propagate):
+> `system/templates/ROLE-CPU.md` — **all six** constants: `EVAL_HOST`, `EVAL_REDIS_HOST`,
+> `EVAL_REDIS_PORT`, `SELLA_CHECKOUT`, `EVAL_PYTHON`, and `EVAL_MOLECULES_DIR` (the last one is the
+> one whose absence fails *every* molecule — see the note above). Confirm the committed values equal
+> the block above — the template is injected into every agent's `HEARTBEAT.md` at launch; editing a
+> per-run copy afterward won't propagate:
 > ```bash
-> grep -nE "EVAL_HOST|EVAL_REDIS_PORT|SELLA_CHECKOUT|EVAL_PYTHON" system/templates/ROLE-CPU.md
+> grep -nE "EVAL_HOST|EVAL_REDIS_HOST|EVAL_REDIS_PORT|SELLA_CHECKOUT|EVAL_PYTHON|EVAL_MOLECULES_DIR" system/templates/ROLE-CPU.md
 > ```
 
-**ssh-alias note (if your cluster uses them):** always pass the **real hostname** to
-`babysit_validate.sh`, not an ssh alias — the alias may not resolve from a remote host. If a worker
-host can't resolve the eval head's hostname at all, pass the eval head's **IP** instead for that host.
+**ssh-alias note:** aliases like `cpu-33` resolve **from your laptop only**. Anything that runs *on a
+cluster host* and names another host must use the **real hostname** (`a002dc-0002`) or its IP.
+
+---
+
+## ⚠️ STOP — the shared checkout's `validate.py` is STALE (read before deploying anything)
+
+`/home/tsypin/opt_problem_optbench/validate.py` is an **old, incorrect** validator (SHA `d4109064...`).
+The **workers never import it**, so the pool is fine — but the **client** side (`eval_candidate.py`)
+does, and a client running the stale validator scores candidates wrongly.
+
+**Every client must use the corrected validator** from `opt_problem` commit
+`46b91c20b54b3c7abe5d4ab6702bedd289ced08f` (SHA `e968f6db...`). A known-good copy is on the eval head at
+`/home/tsypin/opt_problem_force_call_revalidation_20260724/evaluator/validate.py`.
+
+That is why `$SELLA_CHECKOUT` is a **dedicated per-run checkout**, never the workers' repo: it holds
+the corrected `validate.py` **plus this run's `eval_candidate.py`**. Verify both before launch:
+
+```bash
+# 1. corrected validator deployed? must print e968f6db...
+ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/validate.py"
+#    known-good reference on the same host (must match):
+ssh "$EVAL_HOST" 'sha256sum /home/tsypin/opt_problem_force_call_revalidation_20260724/evaluator/validate.py'
+#    if it does NOT match, install the known-good copy into THIS RUN's checkout only:
+ssh "$EVAL_HOST" "cp /home/tsypin/opt_problem_force_call_revalidation_20260724/evaluator/validate.py \
+                     $SELLA_CHECKOUT/validate.py"
+
+# 2. deployed eval_candidate.py == the branch copy? the two hashes must be equal
+shasum -a 256 task-sella/eval_candidate.py
+ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/eval_candidate.py"
+```
+
+Do **not** "fix" `/home/tsypin/opt_problem_optbench/validate.py`. It is shared; leave it alone.
 
 ---
 
@@ -95,8 +173,8 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
 | Role | Host | Ports | Runs |
 |---|---|---|---|
 | Coordinator | `$COORD_HOST` | 3000 (ClawInstitute) | `claude` orchestrator + 10 subagents + ClawInstitute |
-| Eval head | `$EVAL_HOST` | `$REDIS_PORT` (Redis) | Redis + xTB worker pool + `eval_candidate.py` |
-| Extra workers (opt.) | each of `$WORKER_HOSTS` | local→`$REDIS_PORT` (tunnel) | xTB worker pool only |
+| Eval head | `$EVAL_HOST` (a002dc-0002) | 6385 (Redis) | Redis + `eval_candidate.py` (client) — **shared, pre-existing** |
+| Workers ×4 | a002dc-0004/0005/0006/0007 | local 6389 → head 6385 (tunnel) | 48 xTB workers each — **shared, pre-existing** |
 
 ---
 
@@ -110,17 +188,17 @@ host can't resolve the eval head's hostname at all, pass the eval head's **IP** 
   `claude setup-token` once.)
 - Python 3.9+ with `pip install -r requirements.txt` (just `requests`, `pyyaml`).
 - This `autoscientists/` repo, checked out on the branch you want to run.
+- Passwordless `ssh` to `$EVAL_HOST`.
 
-**On the eval head (and any extra worker host):**
-- The `gigaopt` conda env (built from `opt_problem/environment.yml`; brings `xtb`, `ase`, `jax`,
-  `numpy`, `scipy`, `redis`-server, `cloudpickle`). **`JAX_ENABLE_X64=1` is mandatory** — the workers
-  set it; it changes the numerics.
-- An `opt_problem` checkout for the sella eval at `$SELLA_CHECKOUT`.
-- `ssh` reachability **from each extra worker host to the eval head** (passwordless), and **from the
-  coordinator to the eval head**.
+**On the eval head (already provisioned — verify, don't build):**
+- The `gigaopt` conda env at `$EVAL_PYTHON`. **`JAX_ENABLE_X64=1` is mandatory** — the workers set it;
+  it changes the numerics.
+- `$SELLA_CHECKOUT` — this run's dedicated client checkout: corrected `validate.py`, this branch's
+  `eval_candidate.py`, and `molecules/`.
+- Redis on `localhost:6385` with the 192-worker pool attached (Part B verifies this).
 
-> The fastest way to provision a worker/eval host (conda env + checkout + reachability checks +
-> babysat pool) is the **`setup-xtb-worker-host` skill** — see [Part C](#part-c--scale-out-remote-worker-hosts-optional).
+> The `setup-xtb-worker-host` skill provisions a host from scratch. **Not needed for this run** — the
+> pool already exists; see the [Appendix](#part-c--appendix--standing-up-your-own-private-pool-not-this-run).
 
 ---
 
@@ -134,9 +212,15 @@ cd <your-checkout>/autoscientists
 git switch <branch>                    # the AS branch you intend to run
 pip install -r requirements.txt        # requests, pyyaml
 
-# 2. Start the ClawInstitute coordination server (foreground; keep it running, e.g. in tmux)
-npx clawinstitute start                # serves http://localhost:3000 ; first run downloads from npm
+# 2. ClawInstitute: CHECK, do not start. A server has been up since Jul 24 (node PID 72118) and its
+#    DB holds every prior run's forum history.
+curl -sf http://localhost:3000/api/v1/workshops -o /dev/null && echo "clawinstitute UP — do nothing"
+#    ONLY if that fails (server genuinely down) start it, foreground, e.g. in tmux:
+# npx clawinstitute start              # serves http://localhost:3000 ; first run downloads from npm
 ```
+
+> **Never run `npx clawinstitute reset`.** It wipes the shared DB — every prior run's forum history.
+> See [Part D](#part-d--launch-the-run) for run-name hygiene against that same DB.
 
 `launch.py` talks to ClawInstitute at `CLAWINSTITUTE_API` (default `http://localhost:3000/api/v1`) and
 needs an **admin token**, which it resolves in this order:
@@ -157,47 +241,151 @@ That's all for the coordinator until launch — the orchestrator (Part D) runs `
 
 ---
 
-## Part B — Eval head setup (evaluation plane)
+## Part B — Eval-plane preflight (read-only)
 
-Run on `$EVAL_HOST`. Three things must be live **before** any candidate can be scored: **Redis**, the
-**worker pool**, and **`eval_candidate.py` + molecule data**.
+The pool already runs. **You start nothing here.** Run these checks from your laptop **immediately
+before** launch — a stale check is worthless, the pool is shared and its state moves. Every command
+below is read-only; the only write is deploying *this run's* `eval_candidate.py` into *this run's*
+checkout (B1).
 
-```bash
-# 0. Activate the env (build it first if missing — see Part C / the setup-xtb-worker-host skill)
-source <conda>/etc/profile.d/conda.sh
-conda activate gigaopt
-cd "$SELLA_CHECKOUT"                    # eval_candidate.py is at its root
-```
-
-**B1. Deploy the branch-matching `eval_candidate.py`.** The copy that actually runs lives in the
-checkout above; the repo copy in `autoscientists/task-sella/eval_candidate.py` never executes. From
-the coordinator, after `git switch <branch>` in the template, copy the version from the branch you
-are launching:
+**B1. Deploy the branch-matching `eval_candidate.py` into `$SELLA_CHECKOUT`.** The copy that actually
+runs lives on the eval head; the repo copy in `autoscientists/task-sella/eval_candidate.py` never
+executes. From the coordinator, after `git switch <branch>` in the template:
 
 ```bash
-scp autoscientists/task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"
+scp task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"
+shasum -a 256 task-sella/eval_candidate.py
+ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/eval_candidate.py"     # must match the line above
 ```
 
-> **Branch matters:** branches differ in whether `eval_candidate.py` emits a full `per_molecule`
-> table (which feeds `logs/run_log.md` + the SMILES analysis) or aggregate-only. Deploy the copy that
-> matches the orchestrator branch.
+> **This branch's evaluator is aggregate-only by design.** `eval_candidate.py` emits **only** the
+> aggregate score (`fitness` / `is_valid` / `mean_rel_steps` / `mean_rel_energy` /
+> `max_final_energy_delta_kcal_mol` / `converged` + diagnostics); the per-molecule summary is
+> deliberately disabled, so **agents never see a per-molecule breakdown** and no per-molecule
+> artifacts are produced anywhere in the run. Deploy the copy that matches the orchestrator branch —
+> it is also the copy that accepts `--split test`, which this run's promotion gate requires.
+> Also re-run the [validator SHA check](#-stop--the-shared-checkouts-validatepy-is-stale-read-before-deploying-anything) — it is the single most common silent misconfiguration.
 
-**B2. Verify the molecule baselines are fresh.** A git clone/bundle can miss or staledate the
-*untracked* baselines. Confirm `molecules/train_XTB.json` and `test_XTB.json` are the correct
-(fresh) baselines — a stale `train_XTB.json` makes a known-valid candidate score `is_valid=0` with a
-spurious `max_final_energy_delta`. If in doubt, copy both from a known-good eval head.
+**B2. Redis alive, and how loaded is it?**
 
-**B3. Start Redis** (ephemeral — no persistence):
+```bash
+ssh "$EVAL_HOST" 'redis-cli -p 6385 ping'          # PONG
+ssh "$EVAL_HOST" 'redis-cli -p 6385 dbsize'        # queue backlog — near 0 on an idle pool
+ssh "$EVAL_HOST" 'redis-cli -p 6385 llen xtb_tasks'   # xTB queue depth; a big number = someone else is running
+```
+
+A non-trivial backlog is **not** an error — it means another client is using the pool, and your evals
+will simply be slower. Do **not** flush it.
+
+**B3. 192 workers connected, 48 per host.**
+
+```bash
+ssh "$EVAL_HOST" 'redis-cli -p 6385 info clients | grep connected_clients'   # ≈192 (+ your clients)
+for h in cpu-220 cpu-217 cpu-128 cpu-149; do
+  echo -n "$h: "; ssh "$h" 'pgrep -fc distributed_validate.worker'           # 48 each
+done
+```
+
+**B4. Worker hash + `JAX_ENABLE_X64`** — the workers must all be the expected build, with x64 on
+(it changes the numerics, so a mismatched worker silently produces different scores):
+
+```bash
+for h in cpu-220 cpu-217 cpu-128 cpu-149; do
+  echo -n "$h worker: "; ssh "$h" 'sha256sum /home/tsypin/opt_problem_optbench/distributed_validate/worker.py'
+  echo -n "$h x64:    "; ssh "$h" 'tr "\0" "\n" < /proc/$(pgrep -f distributed_validate.worker | head -1)/environ | grep JAX_ENABLE_X64'
+done
+# expect worker SHA 35af7756…  and  JAX_ENABLE_X64=1  on every host
+```
+
+Also confirm the split metadata the workers score against: TRAIN `9ec64608...`, TEST `8a1b4708...`,
+250 molecules each. A mismatched TEST metadata SHA is a top suspect when *every* candidate comes back
+`REJECTED_TEST` (see [Troubleshooting](#troubleshooting)).
+
+**B5. Smoke-test the evaluator on TRAIN** (this is exactly what a CPU-eval agent does — one train
+eval, **~95–125 s** on the healthy pool). Note `--molecules-dir`: it is **mandatory**, because the client
+bakes absolute xyz paths into every Redis task and the worker opens them on its own filesystem, where
+`$SELLA_CHECKOUT` does not exist. Use this exact command:
+
+```bash
+ssh "$EVAL_HOST" "cd $SELLA_CHECKOUT && JAX_ENABLE_X64=1 $EVAL_PYTHON eval_candidate.py \
+  --program algo.py --split train \
+  --molecules-dir $EVAL_MOLECULES_DIR \
+  --redis-host localhost --redis-port 6385"
+```
+
+Expect a **single JSON line** ending stdout, aggregate-only (no `per_molecule` key on this branch):
+`fitness`, `is_valid`, `mean_rel_steps`, `mean_rel_energy`, `max_final_energy_delta_kcal_mol`,
+`converged`, `invalid_reason`, `duration_s`, `num_results`, `num_errors`, `lower_is_better`.
+
+**Verified baseline (measured on this pool 2026-07-27, stock Sella `algo.py`, against the
+**regenerated** metadata in `$EVAL_MOLECULES_DIR`) — TRAIN:**
+
+| Field | Expected |
+|---|---|
+| `fitness` | **1.000000** |
+| `is_valid` | `1` |
+| `mean_rel_energy` | `1.0000000` |
+| `max_final_energy_delta_kcal_mol` | ≈ `0` |
+| `converged` | `1.0` |
+| `num_results` / `num_errors` | `250` / `0` |
+| `duration_s` | ≈ **95–125** |
+
+> The invariant: **the unmodified baseline reproduces the split metadata exactly**, because that
+> metadata was regenerated against this same worker build and `algo.py`. So the baseline scores
+> exactly **1.000000**. Any other baseline value — in a guide, a note, or a seeded anchor — means the
+> anchor was taken against different metadata and is wrong; correct it where you find it.
+
+Failure modes: if it **hangs** → nothing is consuming the queue (recheck B2/B3, and that the port
+really is `6385`). If it returns in **~2.6 s with 250/250 errors** and `No such file or directory:
+.../molecules/xyz/<mol>_mm.xyz` → you dropped `--molecules-dir`. If `is_valid=0` unexpectedly → wrong
+`validate.py` or stale `molecules/*_XTB.json` in `$SELLA_CHECKOUT`.
+
+**B6. Smoke-test the TEST split too** — this run promotes on a held-out test gate (Part E), so the
+test path must work *before* launch, not on the first provisional keep. Identical command, only
+`--split test` differs:
+
+```bash
+ssh "$EVAL_HOST" "cd $SELLA_CHECKOUT && JAX_ENABLE_X64=1 $EVAL_PYTHON eval_candidate.py \
+  --program algo.py --split test \
+  --molecules-dir $EVAL_MOLECULES_DIR \
+  --redis-host localhost --redis-port 6385"
+```
+
+**Verified baseline — TEST:** `fitness` **1.000000**, `is_valid=1`, `mean_rel_energy` `1.0000000`,
+`max_final_energy_delta_kcal_mol` ≈ `0`, `converged` `1.0`, `num_results=250`, `num_errors=0`,
+`duration_s` ≈ **34–49** (the test eval is *faster* than train).
+
+Record both numbers: they are what the run's two anchors (`metric_value` = **1.000000**,
+`test_metric_value` = **1.000000**) get seeded from, and they are how you tell a healthy cycle 1 from
+a broken one. Both splits landing on exactly 1.000000 with `is_valid=1` and 250/250 is the
+signature that the baseline reproduces the split metadata exactly. **Any other value** means you are
+pointed at the wrong `--molecules-dir` or at unregenerated metadata, and must be fixed before launch.
+
+**B7. Pool is clean afterwards.** Right after a completed eval:
+
+```bash
+ssh "$EVAL_HOST" 'redis-cli -p 6385 dbsize; redis-cli -p 6385 info clients | grep connected_clients'
+```
+
+`dbsize` back at **0** and **192** workers connected is the "pool drained cleanly, nothing leaked" signal.
+
+---
+
+## Part C — APPENDIX — standing up your OWN private pool (NOT this run)
+
+> **Not applicable to this run.** This run uses the shared 192-worker pool described above; running
+> anything in this appendix against it would disrupt other clients. This section exists only for the
+> separate case where you are building a *private* pool on hosts you own.
+
+<details>
+<summary>Private-pool setup (Redis + babysat workers + tunnels)</summary>
+
+Pick your own `$REDIS_PORT` (not 6385) and `NUM_WORKERS=<workers-per-host>`, sized to host cores.
+Start Redis on your own eval head (ephemeral — no persistence), then a babysat worker pool:
 
 ```bash
 scripts/start_redis.sh "$REDIS_PORT"   # = redis-server --port $REDIS_PORT --save "" --appendonly no
-```
 
-**B4. Start the xTB worker pool** (consumers of the queue). Run in tmux so it survives your shell.
-For a pool **on the eval head itself** (local Redis), set `<redis_host>=localhost` and
-`local_redis_port = $REDIS_PORT`:
-
-```bash
 # scripts/babysit_validate.sh <redis_host> <redis_port> <local_redis_port> <num_workers> \
 #                              [mode] [poll] [verbose] [log_dir] [python] [xtb_threads] \
 #                              [max_tasks] [task_timeout_s] [max_task_rss_gb]
@@ -207,59 +395,36 @@ tmux new-session -d -s gigaevo_validate_workers \
      logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
 ```
 
-What the trailing args mean (and their defaults): `$NUM_WORKERS` worker processes; `xtb` mode; `1.0`s
-poll; non-verbose; logs in `logs_validate/`; `1` xTB thread/worker (`OMP_NUM_THREADS=1`); **respawn
-each worker after `300` tasks** (bounds xTB memory growth); kill a task after `2100`s; kill a task
-above `32` GiB RSS. The babysitter respawns dead workers and (for a **remote** Redis host) sets up the
-SSH tunnel itself — see Part C.
+Trailing args: `$NUM_WORKERS` worker processes; `xtb` mode; `1.0`s poll; non-verbose; logs in
+`logs_validate/`; `1` xTB thread/worker (`OMP_NUM_THREADS=1`); **respawn each worker after `300`
+tasks** (bounds xTB memory growth); kill a task after `2100`s; kill a task above `32` GiB RSS.
 
-**B5. Smoke-test the evaluator** against the running pool (this is exactly what a CPU-eval agent
-does):
-
-```bash
-python eval_candidate.py --program algo.py --split train --redis-host localhost --redis-port "$REDIS_PORT"
-```
-
-Expect a single JSON line ending stdout with `fitness`, `is_valid`, `mean_rel_steps`,
-`max_final_energy_delta_kcal_mol` (and, on a per-molecule branch, a `per_molecule` array). If it
-hangs, no workers are consuming (recheck B4); if `is_valid=0` unexpectedly, recheck B2.
-
----
-
-## Part C — Scale out remote worker hosts (optional)
-
-Add capacity by running more workers on other hosts that point at the eval head's Redis. The
-babysitter opens the **reverse tunnel for you** when the Redis host is remote (`ssh -f -N -L
-<local_port>:localhost:$REDIS_PORT $EVAL_HOST`), so you do **not** create tunnels by hand.
-
-On each host in `$WORKER_HOSTS` (env active, `opt_problem` checked out), pick a free local port for
-the tunnel (e.g. `6380`) and:
+To add remote worker hosts, the babysitter opens the tunnel for you when the Redis host is remote
+(`ssh -f -N -L <local_port>:localhost:$REDIS_PORT $EVAL_HOST`) — do not create tunnels by hand:
 
 ```bash
 LOCAL_PORT=6380   # any free port on this worker host
-cd <opt_problem-checkout>
 tmux new-session -d -s gigaevo_validate_workers \
   "source <conda>/etc/profile.d/conda.sh && conda activate gigaopt && cd <opt_problem-checkout> && \
-   scripts/babysit_validate.sh $EVAL_HOST $REDIS_PORT $LOCAL_PORT $NUM_WORKERS xtb 1.0 false \
+   scripts/babysit_validate.sh <eval-head-real-hostname> $REDIS_PORT $LOCAL_PORT $NUM_WORKERS xtb 1.0 false \
      logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
 ```
 
-- Use the eval head's **real hostname** (an ssh alias may not resolve from the worker). If a host
-  can't resolve the hostname, pass the eval head's **IP** instead.
-- `$LOCAL_PORT` just needs to be free on that host; the script errors if a matching tunnel already
-  exists (pick another local port).
-- **Easiest path:** the `setup-xtb-worker-host` skill provisions a host from scratch — builds the
-  `gigaopt` env from `opt_problem/environment.yml`, clones `opt_problem` on the matching branch,
-  verifies ssh/Redis reachability, and launches the babysat tmux pool. Use it for
-  "add `<host>` to the pool"-type requests.
+- Use the eval head's **real hostname** (an ssh alias may not resolve from the worker); if name
+  resolution fails on that host, use its **IP**.
+- `$LOCAL_PORT` just needs to be free on that host; the script errors if a matching tunnel exists.
+- The `setup-xtb-worker-host` skill does all of the above from scratch (env, checkout, reachability,
+  babysat tmux pool).
 
-Verify a worker host:
+Verify a private worker host:
 
 ```bash
-ssh <host> 'pgrep -fc distributed_validate.worker'          # ~= $NUM_WORKERS
-ssh <host> 'ss -ltn | grep -w 6380'                          # tunnel present (remote hosts; your LOCAL_PORT)
+ssh <host> 'pgrep -fc distributed_validate.worker'
+ssh <host> 'ss -ltn | grep -w 6380'
 ssh <host> 'tail -n 20 <opt_problem-checkout>/logs_validate/*.log'   # no repeated Traceback/ERROR
 ```
+
+</details>
 
 ---
 
@@ -274,14 +439,25 @@ and follow it"*). Start the TUI, then give it **one** prompt:
 
 ```bash
 cd <your-checkout>/autoscientists
-claude --dangerously-skip-permissions          # ONE interactive session you keep open + watch
+
+# preflight: this CLI build must actually carry Opus 5 (must print >= 1)
+strings -a "$(readlink -f "$(which claude)")" | grep -c claude-opus-5
+
+claude --dangerously-skip-permissions --model claude-opus-5   # ONE interactive session, kept open + watched
 #  then type one prompt into it:
 #    Read runbook.md and execute. Task: task-sella. Run name: <run-name>.
 ```
 
 It loops open-ended until you `Ctrl+C`. **When the session ends or dies, continue it with
-`claude --resume`** (pick that session) — this preserves the **full conversation context**, so the
-orchestrator never loses the champion / cycle state.
+`claude --resume --model claude-opus-5`** (pick that session) — this preserves the **full
+conversation context**, so the orchestrator never loses the champion / cycle state.
+
+> **On the model flag.** CLI **2.1.220** carries Opus 5 and **does retain the session model across
+> `--resume`** (verified: a session created on `claude-opus-5` and resumed with no flag stayed on
+> `claude-opus-5`). Older builds did not: **2.1.207** silently resumed on `claude-opus-4-8`, and it
+> contained no `claude-opus-5` string at all — both `--model opus` and no-flag resolved to Opus 4.8.
+> So pass `--model claude-opus-5` explicitly anyway; it is free insurance against an older CLI or a
+> different machine, and the `strings` preflight above catches a build that can't honour it.
 
 > ⚠️ **Do NOT wrap a headless `claude -p` in an auto-restart loop.** A `-p` shot starts a **fresh, empty
 > context** on every restart; the upstream resume (Step 0 "Resume after interruption") is prose-only with
@@ -303,20 +479,102 @@ What happens:
    workshop + main workspace.
 3. The orchestrator then forms teams, seeds one proposal per team, and begins the cycle loop:
    dispatch analysts (propose) + CPU-eval agents (claim → `scp` candidate to the eval head → `ssh`
-   `eval_candidate.py` → parse JSON → record), promote the champion on a valid, strictly-better
-   `fitness` (margin ≥ 1e-3), then health/stagnation checks. It runs **open-ended** until you Ctrl+C.
+   `eval_candidate.py --split train` → parse JSON → record). A train improvement (≥ 1e-3) is only
+   **provisional**: the *same, frozen* candidate is then re-scored with `--split test`, and the
+   champion advances only if the test score also improves (> 1e-4) **and** the test run is valid
+   (see [Part E](#part-e--monitor-a-running-run)). Then health/stagnation checks. It runs
+   **open-ended** until you Ctrl+C.
 
 > Re-read the [parameters note](#deployment-parameters-set-these-first): the agents take the eval
-> target from `system/templates/ROLE-CPU.md`. Confirm those values match your `$EVAL_HOST` /
-> `$REDIS_PORT` / `$SELLA_CHECKOUT` / `$EVAL_PYTHON` **before** launching; edit the template (not a
-> per-run copy) if not. Per-run tweaks go in the materialized `../<run-name>/` files, never the template.
+> target from `system/templates/ROLE-CPU.md`. Confirm those values match `$EVAL_HOST` /
+> `$REDIS_PORT` (**6385**) / `$SELLA_CHECKOUT` / `$EVAL_PYTHON` / `$EVAL_MOLECULES_DIR` **before** launching; edit the
+> template (not a per-run copy) if not. Per-run tweaks go in the materialized `../<run-name>/` files,
+> never the template.
 
-The run uses Claude (Opus). Note: launching the loop with `--model claude-fable-5` on this chemistry
-content trips a safety fallback that silently switches to Opus anyway.
+The run uses **Opus 5** (`--model claude-opus-5`), inherited by all 10 subagents. Note: launching the
+loop with `--model claude-fable-5` on this chemistry content trips a safety fallback that silently
+switches to Opus anyway — that caveat still holds. Opus 5 itself was probed directly against this
+task's `TASK.md` and does **not** refuse it, so no fallback is expected on this run.
+
+### Run-name and ClawInstitute hygiene (do this before you type the prompt)
+
+- **Do NOT run `npx clawinstitute start`** — a server has been up since Jul 24 (node PID 72118) and
+  its DB holds every prior run's forum history. **Never run `npx clawinstitute reset`.**
+- **Pick a run name that is absent from BOTH** the sibling dirs and the live workshop list:
+
+  ```bash
+  ls -d /Users/tsypin/Documents/gigaopt/*
+  curl -s -H "Authorization: Bearer $CLAWINSTITUTE_TOKEN" \
+    http://localhost:3000/api/v1/workshops | python3 -m json.tool | grep -i name
+  ```
+
+  `launch.py:466-472` validates **neither charset nor length** and will silently **reuse an existing
+  workshop** if the derived name collides — the new run then writes into an old run's forum. Keep it
+  **≤ 16 chars, lowercase, underscores only** (the agent prefix is truncated above 16 chars).
+- **Never leave a materialized run dir inside the template checkout.** `launch.py` writes to
+  `../<run-name>/`, i.e. a *sibling* of `autoscientists/`; a prior run (`sella_nocheat_r1/`) ended up
+  inside the template dir, where it is untracked and **not gitignored**. Because of that, **never run
+  `git add -A` in this repo** — check `git status` before any staging.
 
 ---
 
 ## Part E — Monitor a running run
+
+### The promotion contract: a held-out TEST gate
+
+A candidate becomes champion **only** when all three hold:
+
+| # | Condition | Threshold |
+|---|---|---|
+| a | valid TRAIN run and `current_best_train − our_train ≥ KEEP_MARGIN` | `1e-3` |
+| b | `current_best_test − our_test > TEST_MARGIN` | `1e-4` |
+| c | the TEST run has `is_valid == 1` | held-out energy gate |
+
+Ties and exact-margin improvements are **rejects**. The test eval re-scores the *same, already-frozen*
+candidate (same remote path, same `eval_candidate.py`, only `--split test` added — never a re-edit
+between the two), and runs **only** after a provisional train keep, so a train DISCARD never spends a
+test eval. `champion.md` carries **two** anchors — `metric_value` (train) and `test_metric_value` —
+which advance **together**, only on an accepted promotion.
+
+A candidate that passes (a) but fails (b) or (c) is recorded as **`REJECTED_TEST`**, distinct from
+`DISCARD`: it lands in the team workspace file `non_generalizable.md` (not `dead_ends.md`), and its
+`[RESULT]` post states whether it failed on test *invalidity*, insufficient test *improvement*, or
+both. Analysts read `non_generalizable.md` before proposing, and the mechanism family is abandoned.
+
+### `NEAR_MISS` — passed everything, lost the race
+
+There is one more way a candidate can clear all three conditions and still not become champion: it
+loses the **promotion race**. Agents evaluate in parallel, so while one candidate is out on the
+worker pool another can land on `champion.md` first. The cpu-eval agent detects this — either its
+pre-put gate aborts (an equal-or-better champion arrived mid-eval) or its race guard fires
+(`champion.md` no longer records this `exp_id`) — and records the outcome as **`NEAR_MISS`**.
+
+What that means for you as operator:
+
+- **The science succeeded.** Train gate passed, held-out test gate passed. Only the scheduling lost.
+- **Nothing was promoted.** `champion.md` is not written and `champion/algo.py` is not copied — so
+  a `NEAR_MISS` row in the ledger is *not* a champion advance and the anchors do not move.
+- **It is auto-re-queued** as `{exp_id}_stack`, so the identical change is re-tested against the
+  NEW champion without any operator action. You should see that `_stack` item appear in the team
+  queue and report an outcome a rotation or two later.
+- **It is never a fault.** It writes to neither `dead_ends.md` nor `non_generalizable.md`, never
+  counts toward a dead end or a hypothesis falsification, and is excluded from the stagnation
+  window (by construction, some candidate *was* promoted in that rotation).
+
+Occasional `NEAR_MISS`es are a sign of a **healthy, productive** run: two agents in one rotation
+both produced promotable candidates. If they become frequent, the only thing worth considering is
+rotation sizing — the roster is racing itself, and some eval time is being spent re-testing changes
+that already passed. `task/meta_diagnostics.py` prints `near_miss_count` and a
+`has_frequent_near_miss` flag for exactly this.
+
+**What this changes operationally.** Expect **roughly twice the eval load per provisional keep**
+(a train eval is ~95–125 s and its test twin ~34–49 s on an idle pool; the pool is shared, so both stretch
+under load), and expect `REJECTED_TEST` to appear regularly — it is a **healthy, informative**
+outcome, not a failure: a real train improvement that did not generalize.
+This gate exists because a prior run promoted a champion that was −5 % on train and **INVALID** on
+held-out test.
+
+### Commands
 
 Everything is under the materialized run dir `../<run-name>/` (call it `$RUN`):
 
@@ -328,10 +586,25 @@ tail -f $RUN/logs/experiments.jsonl
 cat   $RUN/champion/SOURCE                 # who set the current champion + fitness
 cat   $RUN/champion/algo.py                # the current best optimizer
 
-# Per-molecule view (per-molecule branches): autoresearch run.log-style, rebuilt each cycle
-less  $RUN/logs/run_log.md                 # per experiment: full per-molecule table
-ls    $RUN/logs/molecule_results/          # raw per-agent shards (<agent>.jsonl)
-column -t -s$'\t' $RUN/task/molecule_smiles.tsv | less   # mol_id → name/formula/SMILES (if present)
+# BOTH champion anchors (champion.md lives on ClawInstitute, not on disk)
+curl -s -H "Authorization: Bearer $CLAWINSTITUTE_TOKEN" \
+  "http://localhost:3000/api/v1/workspaces/$MAIN_WS_ID/files/champion.md" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['content'][:600])" \
+  | grep -E "metric_value|test_metric_value|experiment_id"
+
+# Outcome mix, incl. REJECTED_TEST, and both anchors over time
+python3 -c "
+import json,sys
+for l in open('$RUN/logs/experiments.jsonl'):
+    r=json.loads(l)
+    print(r.get('cycle'), r.get('outcome'), r.get('fitness'), r.get('is_valid'),
+          r.get('test_fitness'), r.get('test_is_valid'))
+" | tail -40
+python3 -c "
+import json,collections
+c=collections.Counter(json.loads(l).get('outcome') for l in open('$RUN/logs/experiments.jsonl'))
+print(dict(c))
+"
 
 # Sessions + raw agent transcripts
 tail -f $RUN/logs/sessions.jsonl
@@ -341,14 +614,39 @@ ls      $RUN/logs/raw/
 curl -s -H "Authorization: Bearer $CLAWINSTITUTE_TOKEN" \
   http://localhost:3000/api/v1/workshops | python3 -m json.tool | head
 
-# Eval pool health (on the eval head)
-ssh "$EVAL_HOST" 'pgrep -fc distributed_validate.worker'
-ssh "$EVAL_HOST" "redis-cli -p $REDIS_PORT info clients"
-ssh "$EVAL_HOST" -t tmux attach -t gigaevo_validate_workers   # detach: Ctrl-b d
+# Eval pool health — READ-ONLY (shared pool: never attach-and-Ctrl+C, never flush, never restart)
+ssh "$EVAL_HOST" 'redis-cli -p 6385 ping; redis-cli -p 6385 llen xtb_tasks'
+ssh "$EVAL_HOST" 'redis-cli -p 6385 info clients | grep connected_clients'
+for h in cpu-220 cpu-217 cpu-128 cpu-149; do echo -n "$h: "; ssh "$h" 'pgrep -fc distributed_validate.worker'; done
 ```
 
-A healthy run shows `experiments.jsonl` growing, occasional `KEEP` outcomes lowering the champion
-`fitness`, and (on per-molecule branches) `run_log.md` filling with per-molecule tables.
+`$MAIN_WS_ID` is the main workspace id `launch.py` printed at materialization; it is also in any
+agent's `agents/<name>/credentials.json`.
+
+`logs/experiments.jsonl` is one flat row per experiment:
+`ts, cycle, exp_id, team, agent, axis, direction, value, fitness, is_valid, test_fitness,
+test_is_valid, outcome, delta, post_id`. `fitness`/`is_valid` are the **train** numbers;
+`test_fitness`/`test_is_valid` are populated only on candidates that reached the test gate (they are
+`null` on train DISCARDs). `outcome` is exactly one of:
+
+| `outcome` | Meaning |
+|---|---|
+| `KEEP` | Promoted — train **and** held-out test both passed, and it won the promotion race. |
+| `NEAR_MISS` | Train **and** held-out test both passed, but it lost the promotion race, so it was **not** promoted (anchors unchanged, `champion/algo.py` unchanged). Positive evidence, in **neither** dead-end file; auto-re-queued as `{exp_id}_stack`. Healthy, not a fault. |
+| `DISCARD` | A real, valid experiment that did not improve. Scientific evidence → team `dead_ends.md`. |
+| `REJECTED_TEST` | Improved on train, failed the held-out test gate. Evidence about *generalization* → team `non_generalizable.md`, **never** `dead_ends.md`; closes that mechanism family. |
+| `FAILED` | Infra/harness failure, an unapplied diff, or a scope abort. **It tested nothing** — it is never evidence, never counts toward a dead-end or stagnation streak, and its queue item is **re-queued**, not closed. |
+
+A healthy run shows `experiments.jsonl` growing; a **mix** of `DISCARD`, `REJECTED_TEST`, occasional
+`KEEP`, and the odd `NEAR_MISS`; and both `metric_value` and `test_metric_value` stepping down
+**together** on each `KEEP` (never one without the other, and never on a `NEAR_MISS` — that one does
+not promote). `REJECTED_TEST` is **normal and informative** — it is the gate doing its job, not the
+search failing. Zero `REJECTED_TEST` over many cycles is as suspicious as all-`REJECTED_TEST` — see
+[Troubleshooting](#troubleshooting). `NEAR_MISS` is likewise not a problem: see the section above.
+
+A **burst of `FAILED`**, by contrast, is never a scientific signal: it means the **pool or harness is
+unhealthy** (workers gone, wrong port, missing `--molecules-dir`, dead tunnel), *not* that the search
+space is exhausted. Re-run the Part B preflight rather than reading anything into the outcome mix.
 
 ---
 
@@ -356,20 +654,21 @@ A healthy run shows `experiments.jsonl` growing, occasional `KEEP` outcomes lowe
 
 ```bash
 # 1. Stop the orchestrator: Ctrl+C in the interactive `claude` session (open-ended; only you stop it).
+#    That is the ONLY teardown this run performs.
 
-# 2. Stop the eval pool (eval head + every worker host). Ctrl+C the babysitter, or:
-ssh "$EVAL_HOST" 'tmux kill-session -t gigaevo_validate_workers'
-ssh "$EVAL_HOST" 'pkill -f distributed_validate.worker'      # belt-and-suspenders
-#   (the babysitter closes any SSH tunnel it opened on exit; repeat for each WORKER_HOST)
+# 2. Eval plane: DO NOTHING. The pool, its Redis, and its workers are shared and pre-existing.
+#    Do NOT kill workers, do NOT `tmux kill-session`, do NOT `redis-cli flushall`,
+#    do NOT touch /home/tsypin/opt_problem_optbench.
 
-# 3. (Only if reusing the host for a fresh run) flush the eval queue:
-ssh "$EVAL_HOST" "redis-cli -p $REDIS_PORT flushall"
-
-# 4. (Optional) stop ClawInstitute and the Redis server when fully done.
+# 3. ClawInstitute: leave it running. Do NOT `npx clawinstitute reset` — its DB holds every
+#    prior run's forum history.
 ```
 
-The materialized `../<run-name>/` directory is your run artifact — keep it; nothing else needs
-cleanup between runs except the Redis queue.
+> The teardown commands for a **private** pool (kill the babysitter session, flush your own Redis)
+> live in the [Appendix](#part-c--appendix--standing-up-your-own-private-pool-not-this-run) case only.
+
+The materialized `../<run-name>/` directory is your run artifact — keep it. Nothing else needs
+cleanup between runs.
 
 ---
 
@@ -377,14 +676,20 @@ cleanup between runs except the Redis queue.
 
 | Symptom | Cause / fix |
 |---|---|
-| `launch.py`: "No API key found" | ClawInstitute not running or token unset → `npx clawinstitute start` and set `CLAWINSTITUTE_TOKEN` (Part A). |
-| CPU-eval agents hang on eval | No workers consuming the queue → start/repair the pool (B4); check `pgrep -fc distributed_validate.worker`. |
-| Candidate scores `is_valid=0` unexpectedly | Stale `molecules/train_XTB.json` on the eval head → copy fresh `train_XTB.json` + `test_XTB.json` (B2). |
-| Evals fail with connection refused | Eval target mismatch between `ROLE-CPU.md` and your actual pool → align `EVAL_HOST`/`EVAL_REDIS_PORT` (Deployment parameters + Part D note). |
-| `run_log.md` empty / no per-molecule | Eval head running an aggregate-only `eval_candidate.py` → redeploy the per-molecule branch's copy (B1). |
-| Babysitter: "Found existing SSH tunnel … use another local port" | Local tunnel port already in use → pass a different `<local_redis_port>`. |
-| Remote worker can't reach the eval head by name | Pass the **real hostname**; if name resolution fails on that host, use the eval head's **IP**. |
-| Whole loop dies silently after a long session | Continue the **same** interactive session with `claude --resume` (preserves full context). Do **not** wrap a headless `claude -p` in an auto-restart loop — a fresh `-p` context + non-persisted `cycle_count` can reseed the search from baseline (see the Part D warning). |
+| `launch.py`: "No API key found" | ClawInstitute token unset (the server is already running) → `export CLAWINSTITUTE_TOKEN=…` (Part A). Do **not** `npx clawinstitute start` a second server. |
+| **ALL cpu agents hanging on eval** | Wrong Redis port (`6390` is dead — it must be **6385**) or the pool is down → run the **Part B preflight** (B2–B4). Fix `EVAL_REDIS_PORT` in `system/templates/ROLE-CPU.md` **before** launch; a running run's agents have it baked into their `HEARTBEAT.md`. |
+| **Every candidate comes back `REJECTED_TEST`** | Either the test anchor is mis-seeded (a `test_metric_value` seeded from something better than the real baseline makes (b) unreachable — compare it against the Part B6 baseline test score) or the deployed TEST metadata doesn't match (expected SHA `8a1b4708...`, 250 molecules). Also check the corrected `validate.py` is deployed (SHA `e968f6db...`). |
+| **`champion.md` advances but `champion/algo.py` keeps the seed md5** | Step 7b1 propagation failed — the champion record moved without the code. The recorded champion is now a lie. Compare `md5 $RUN/champion/algo.py` against the seed and against the promoted `exp_id`'s candidate; stop and reconcile before more cycles. |
+| **`logs/experiments.jsonl` stays empty** | The ledger writer hook never fired (the orchestrator writes this file, not the agents) → confirm the orchestrator is past step 5 and that `$RUN/logs/` exists and is writable; check `$RUN/logs/raw/` for agent output that never got recorded. |
+| Candidate scores `is_valid=0` unexpectedly | Wrong `validate.py` in `$SELLA_CHECKOUT`, or stale `molecules/train_XTB.json` / `test_XTB.json` there → re-run the validator SHA check and B5. |
+| Evals fail with connection refused | Eval target mismatch between `ROLE-CPU.md` and the live pool → align `EVAL_HOST` / `EVAL_REDIS_HOST` / `EVAL_REDIS_PORT` (Deployment parameters + Part D note). |
+| **Eval returns in ~2.6 s with `num_errors=250`**, `No such file or directory: .../molecules/xyz/<mol>_mm.xyz` | `--molecules-dir` was omitted (or points at a path the workers don't have) → always pass `--molecules-dir $EVAL_MOLECULES_DIR` (see B5). |
+| **A burst of `FAILED` outcomes** | Infra, not science: pool/harness broken (workers gone, wrong port, missing `--molecules-dir`, dead tunnel). `FAILED` tested nothing — re-run the Part B preflight; the items should be re-queued, not written off as dead ends. |
+| Zero `REJECTED_TEST` over many cycles, many `KEEP`s | Suspect the test gate is not actually running — check that `test_fitness`/`test_is_valid` are non-null in `experiments.jsonl` and that `--split test` works (B6). |
+| **Frequent `NEAR_MISS` outcomes** | Not a fault — both gates passed and only the promotion race was lost; each one is auto-re-queued as `{exp_id}_stack`. It means the roster is racing itself, so some eval time goes to re-testing changes that already passed. Consider rotation sizing. Only investigate if the matching `_stack` items never appear in a team `queue.md`, or if `champion.md` *did* advance to a `NEAR_MISS` `exp_id` (that would be a promotion bug). |
+| Remote worker can't reach the eval head by name | Pass the **real hostname** (`a002dc-0002`); if name resolution fails on that host, use its **IP**. |
+| Whole loop dies silently after a long session | Continue the **same** interactive session with `claude --resume --model claude-opus-5` (preserves full context). Do **not** wrap a headless `claude -p` in an auto-restart loop — a fresh `-p` context + non-persisted `cycle_count` can reseed the search from baseline (see the Part D warning). |
+| Session resumed on the wrong model | Older CLIs (e.g. 2.1.207) resume on Opus 4.8 silently → always pass `--model claude-opus-5`, and run `strings -a "$(readlink -f "$(which claude)")" \| grep -c claude-opus-5` (must be ≥ 1). |
 
 ---
 
@@ -393,23 +698,32 @@ cleanup between runs except the Redis queue.
 Set the [Deployment parameters](#deployment-parameters-set-these-first) first, then:
 
 ```bash
-# COORDINATOR ($COORD_HOST)
-npx clawinstitute start                                  # coordination server :3000
+# COORDINATOR — nothing to start; ClawInstitute is already up (never `start` a 2nd one, never `reset`)
+curl -sf http://localhost:3000/api/v1/workshops -o /dev/null && echo "clawinstitute UP"
 export CLAWINSTITUTE_TOKEN=<token>
 cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requirements.txt
-claude --dangerously-skip-permissions        # ONE interactive session; type the prompt:
-#   Read runbook.md and execute. Task: task-sella. Run name: <run-name>.
+strings -a "$(readlink -f "$(which claude)")" | grep -c claude-opus-5      # must be >= 1
+claude --dangerously-skip-permissions --model claude-opus-5   # ONE interactive session; type the prompt:
+#   Read runbook.md and execute. Task: task-sella. Run name: <run-name>.   (<=16 chars, unused name!)
 # resume after it dies (keeps context — never a headless -p restart loop):
-claude --resume
+claude --resume --model claude-opus-5
 
-# EVAL HEAD ($EVAL_HOST) — env active, in $SELLA_CHECKOUT
-scp <coord>:.../task-sella/eval_candidate.py "$SELLA_CHECKOUT/eval_candidate.py"     # branch-matching
-scripts/start_redis.sh "$REDIS_PORT"
-tmux new -d -s gigaevo_validate_workers \
-  "scripts/babysit_validate.sh localhost $REDIS_PORT $REDIS_PORT $NUM_WORKERS xtb 1.0 false logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
-python eval_candidate.py --program algo.py --split train --redis-host localhost --redis-port "$REDIS_PORT"   # smoke test
+# EVAL PLANE — SHARED, ALREADY RUNNING. Deploy this run's client files, then PREFLIGHT (read-only).
+scp task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"   # branch-matching
+ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/validate.py"          # must be e968f6db… (corrected)
+ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/eval_candidate.py"    # must equal the local branch copy
+ssh "$EVAL_HOST" 'redis-cli -p 6385 ping; redis-cli -p 6385 dbsize; redis-cli -p 6385 llen xtb_tasks'
+ssh "$EVAL_HOST" 'redis-cli -p 6385 info clients | grep connected_clients'        # ~192
+for h in cpu-220 cpu-217 cpu-128 cpu-149; do echo -n "$h: "; ssh "$h" 'pgrep -fc distributed_validate.worker'; done   # 48 each
+# baselines: train fitness 1.000000 (~95-125 s) · test fitness 1.000000 (~34-49 s) · both is_valid=1,
+# converged=1.0, 250 results / 0 errors, max_final_energy_delta_kcal_mol ~0.
+# --molecules-dir is MANDATORY: workers lack $SELLA_CHECKOUT, and $EVAL_MOLECULES_DIR
+# (/home/tsypin/as_testgate_molecules, present on EVERY worker host) holds the REGENERATED split
+# metadata the baseline reproduces exactly.  ANY baseline != 1.000000 = wrong dir / old metadata.
+ssh "$EVAL_HOST" "cd $SELLA_CHECKOUT && JAX_ENABLE_X64=1 $EVAL_PYTHON eval_candidate.py --program algo.py --split train --molecules-dir $EVAL_MOLECULES_DIR --redis-host localhost --redis-port 6385"
+ssh "$EVAL_HOST" "cd $SELLA_CHECKOUT && JAX_ENABLE_X64=1 $EVAL_PYTHON eval_candidate.py --program algo.py --split test  --molecules-dir $EVAL_MOLECULES_DIR --redis-host localhost --redis-port 6385"
+ssh "$EVAL_HOST" 'redis-cli -p 6385 dbsize'                                       # 0 afterwards = pool clean
 
-# EACH EXTRA WORKER HOST ($WORKER_HOSTS) — env active, in the opt_problem checkout; LOCAL_PORT = any free port
-tmux new -d -s gigaevo_validate_workers \
-  "scripts/babysit_validate.sh $EVAL_HOST $REDIS_PORT $LOCAL_PORT $NUM_WORKERS xtb 1.0 false logs_validate \"\$CONDA_PREFIX/bin/python\" 1 300 2100 32"
+# NEVER on this run: start_redis.sh · babysit_validate.sh · pkill workers · redis-cli flushall ·
+#                    any write to /home/tsypin/opt_problem_optbench · npx clawinstitute reset · git add -A
 ```

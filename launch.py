@@ -10,6 +10,16 @@ Usage:
   python3 launch.py my-experiment --task task-sella                       # bundled task (relative path)
   python3 launch.py my-experiment --task /absolute/path/to/task-dir
   python3 launch.py my-experiment --output-dir /tmp/runs                  # create in a specific parent dir
+  python3 launch.py --regenerate-heartbeats /path/to/run-dir              # maintenance: rebuild agents/*/HEARTBEAT.md
+
+Heartbeat regeneration (maintenance mode, launches nothing):
+  Each agent reads `agents/{name}/HEARTBEAT.md`, which is a rendered COPY of
+  system/templates/HEARTBEAT.md with the role doc inlined at launch. Agents never read
+  system/templates/ directly, so editing a ROLE-*.md after launch changes NOTHING until
+  the copies are rebuilt. `--regenerate-heartbeats <run-dir>` re-runs only that
+  composition, reading the RUN's own system/templates/, and touches nothing else. It is a
+  required step for any meta-improvement pass that edits a role template
+  (see system/reference/META-IMPROVEMENT.md).
 
 Task directories are bundled as subdirectories of this repo:
   task-sella/                 — Molecular-geometry optimizer; agents improve repo/algo.py,
@@ -47,6 +57,195 @@ from pathlib import Path
 
 TEMPLATE_DIR = Path(__file__).resolve().parent
 
+# ── Heartbeat composition (used at launch AND by --regenerate-heartbeats) ────
+#
+# An agent's `agents/{name}/HEARTBEAT.md` is a rendered COPY of
+# system/templates/HEARTBEAT.md with the role doc (ROLE-CPU / ROLE-ANALYST /
+# ROLE-MONITOR) and ROLE-TEAM.md inlined into its two placeholders. That copy is
+# the ONLY thing an agent reads at dispatch time — it never opens
+# system/templates/ itself.
+#
+# That is why the composition lives in a reusable function instead of inline in
+# setup_agent(): editing a role template AFTER launch changes nothing for the
+# life of the run unless the copies are rebuilt. A meta pass that edits a
+# system/templates/ROLE-*.md must therefore re-run this composition (see
+# `--regenerate-heartbeats`) before the next dispatch, or the edit stays
+# invisible to every agent while the meta log records it as applied.
+
+ROLE_FILE_MAP = {
+    "gpu": "ROLE-CPU.md",   # legacy "gpu" role also maps to the CPU-eval doc
+    "cpu": "ROLE-CPU.md",   # CPU-eval agents use ROLE-CPU.md
+    "analyst": "ROLE-ANALYST.md",
+    "monitor": "ROLE-MONITOR.md",
+}
+
+# The two placeholder blocks in system/templates/HEARTBEAT.md, matched
+# LITERALLY. If that template's comment wording ever changes, these must change
+# with it: a silent no-match would ship a heartbeat with no role section at all.
+ROLE_PLACEHOLDER = (
+    "<!-- ROLE_CONTENT_PLACEHOLDER -->\n"
+    "<!-- launch.py replaces this with system/templates/ROLE-{role}.md -->"
+)
+TEAM_PLACEHOLDER = (
+    "<!-- TEAM_CONTENT_PLACEHOLDER -->\n"
+    "<!-- launch.py replaces this with system/templates/ROLE-TEAM.md -->"
+)
+
+
+def _strip_role_frontmatter(text):
+    """Drop a role doc's leading frontmatter — the heartbeat already carries one."""
+    parts = text.split("---")
+    if len(parts) >= 3:
+        return "---".join(parts[2:]).strip()
+    return text
+
+
+def compose_heartbeat(role, templates_dir):
+    """Render one agent's HEARTBEAT.md text from the templates in `templates_dir`.
+
+    `templates_dir` is a `system/templates/` directory: this template's own at
+    launch, and the RUN's own copy when regenerating — the run's copy is the one
+    a meta pass edits, because the orchestrator works inside the run directory.
+    Pure: reads templates, returns text, writes nothing.
+    """
+    templates_dir = Path(templates_dir)
+    heartbeat = (templates_dir / "HEARTBEAT.md").read_text()
+
+    # The ROLE-CPU.md default is a last-resort fallback, never a routing rule:
+    # callers are expected to pass a ROLE_FILE_MAP key (regenerate_heartbeats
+    # skips an agent whose role it cannot map). Say so out loud if it ever fires,
+    # because a wrong-role heartbeat looks perfectly healthy from the outside.
+    if role not in ROLE_FILE_MAP:
+        print(f"  WARNING: unknown role '{role}' — falling back to ROLE-CPU.md. "
+              f"Known roles: {sorted(ROLE_FILE_MAP)}")
+    role_src = templates_dir / ROLE_FILE_MAP.get(role, "ROLE-CPU.md")
+    role_content = _strip_role_frontmatter(role_src.read_text()) if role_src.exists() else ""
+
+    team_src = templates_dir / "ROLE-TEAM.md"
+    team_content = _strip_role_frontmatter(team_src.read_text()) if team_src.exists() else ""
+
+    # Warn loudly rather than silently emitting a heartbeat with an empty role
+    # section — an agent with no role doc still boots, and the failure would only
+    # surface as inexplicably off-protocol behaviour many cycles later.
+    if ROLE_PLACEHOLDER not in heartbeat:
+        print(f"  WARNING: no ROLE_CONTENT_PLACEHOLDER in {templates_dir / 'HEARTBEAT.md'} "
+              f"— the '{role}' role doc was NOT inlined")
+    if TEAM_PLACEHOLDER not in heartbeat:
+        print(f"  WARNING: no TEAM_CONTENT_PLACEHOLDER in {templates_dir / 'HEARTBEAT.md'} "
+              f"— ROLE-TEAM.md was NOT inlined")
+
+    heartbeat = heartbeat.replace(ROLE_PLACEHOLDER, role_content)
+    heartbeat = heartbeat.replace(TEAM_PLACEHOLDER, team_content)
+    return heartbeat
+
+
+def _agent_role(agent_dir):
+    """Best-effort role for an EXISTING agent directory, or None if undecidable.
+
+    Returns a key of ROLE_FILE_MAP, or None. Primary source is the `role:` field
+    written into AGENT.md at launch. The name-suffix fallback covers a hand-made
+    or hand-edited agent directory. We return None rather than guessing, because
+    handing an analyst the CPU-eval doc is far worse than leaving its heartbeat
+    stale.
+
+    A `role:` value we cannot map is NOT a guess we are willing to make. It is
+    discarded and we fall through to the name suffix, then to None. This is not
+    hypothetical: HEARTBEAT.md sets `MY_ROLE = "unknown"` when it cannot read
+    AGENT.md at boot and Part 6a writes that straight back, so `role: unknown`
+    is a value a live run really does produce. Trusting it would hit
+    compose_heartbeat's `ROLE_FILE_MAP.get(role, "ROLE-CPU.md")` default and
+    hand an analyst the CPU-eval doc silently — and it would also defeat the
+    name suffix, which recovers "analyst" from `..._analyst1` correctly.
+    """
+    agent_dir = Path(agent_dir)
+    agent_md = agent_dir / "AGENT.md"
+    if agent_md.exists():
+        # Hand-parse the one field we need: this runs before the scaffolding
+        # section below imports yaml, and a single scalar needs no YAML parser.
+        lines = agent_md.read_text().splitlines()
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                if line.startswith("role:"):
+                    # Normalised: compose_heartbeat's lookup is case-sensitive,
+                    # so `role: CPU` must not silently become the default doc.
+                    role = line.split(":", 1)[1].strip().strip("\"'").lower()
+                    if role in ROLE_FILE_MAP:
+                        return role
+                    break  # one role field; an unusable value falls through
+    name = agent_dir.name
+    for suffix, role in (("monitor", "monitor"), ("analyst", "analyst"), ("cpu", "cpu")):
+        if suffix in name:
+            return role
+    return None
+
+
+def regenerate_heartbeats(run_dir, verbose=True):
+    """Rebuild every agents/*/HEARTBEAT.md in an EXISTING run directory.
+
+    Re-runs ONLY the heartbeat composition: no agent registration, no workspace
+    writes, no file copies, no kickoff — nothing else about the run is re-created.
+    Safe to run repeatedly; an agent whose heartbeat is already current is left
+    untouched.
+
+    Templates are read from the RUN's own `system/templates/`, never from this
+    template checkout. That is deliberate: the run's copy is what a meta pass
+    edits, and reading the checkout instead would leak unrelated template edits
+    (possibly from another run) into a live run.
+
+    Returns (written, unchanged, skipped). `skipped > 0` means at least one agent
+    still holds a stale heartbeat — treat that as a failure, not a warning.
+    """
+    run_dir = Path(run_dir).resolve()
+    templates_dir = run_dir / "system" / "templates"
+    agents_dir = run_dir / "agents"
+
+    if not (templates_dir / "HEARTBEAT.md").exists():
+        print(f"ERROR: {templates_dir / 'HEARTBEAT.md'} not found.")
+        print("  --regenerate-heartbeats expects a RUN directory (the one holding")
+        print("  agents/ and system/), not the template directory. No fallback to the")
+        print("  template's own system/templates/ is attempted on purpose: the run's")
+        print("  copy is the one a meta pass edits.")
+        sys.exit(1)
+    if not agents_dir.is_dir():
+        print(f"ERROR: no agents/ directory in {run_dir} — nothing to regenerate.")
+        sys.exit(1)
+
+    print(f"Regenerating heartbeats in {run_dir}")
+    print(f"  Templates: {templates_dir}")
+
+    written = unchanged = skipped = 0
+    # Directories only, dotfiles skipped — the same roster filter the orchestrator
+    # and HEARTBEAT use, so a stray .DS_Store is never mistaken for an agent.
+    for agent_dir in sorted(p for p in agents_dir.iterdir()
+                            if p.is_dir() and not p.name.startswith(".")):
+        role = _agent_role(agent_dir)
+        if role is None:
+            print(f"  SKIP  {agent_dir.name}: AGENT.md has no usable role (missing, or a value "
+                  f"outside {sorted(ROLE_FILE_MAP)}) and none is inferable from the name "
+                  f"— HEARTBEAT.md left as-is (stale beats wrong-role). Fix the `role:` field "
+                  f"in its AGENT.md and re-run.")
+            skipped += 1
+            continue
+        heartbeat = compose_heartbeat(role, templates_dir)
+        hb_path = agent_dir / "HEARTBEAT.md"
+        if hb_path.exists() and hb_path.read_text() == heartbeat:
+            unchanged += 1
+            if verbose:
+                print(f"  ok    {agent_dir.name} ({role}) — already current")
+            continue
+        hb_path.write_text(heartbeat)
+        written += 1
+        if verbose:
+            print(f"  wrote {agent_dir.name} ({role})")
+
+    print(f"  {written} rewritten, {unchanged} already current, {skipped} skipped")
+    print("  Takes effect on the NEXT dispatch — an agent already running keeps the")
+    print("  copy it read when it was spawned. Regenerate between dispatches.")
+    return (written, unchanged, skipped)
+
+
 # ── ClawInstitute API ────────────────────────────────────────
 
 API = os.environ.get("CLAWINSTITUTE_API", "http://localhost:3000/api/v1")
@@ -81,7 +280,32 @@ _parser.add_argument("--output-dir", default=None, metavar="DIR",
 _parser.add_argument("--protein", default=None, metavar="PROTEIN_ID",
                      help="Protein/assay to focus on, e.g. SPIKE_SARS2_Starr_2020_binding. "
                           "Substituted into task/TASK.md and task/LAUNCH.md after copying.")
+_parser.add_argument("--cpu", type=int, default=6, metavar="N",
+                     help="Number of CPU-eval agents (default: 6). Use a smaller roster for smoke "
+                          "runs. The orchestrator enumerates agents from the run directory, so any "
+                          "size works without editing runbook.md or the task profile.")
+_parser.add_argument("--analysts", type=int, default=3, metavar="N",
+                     help="Number of analyst agents (default: 3). Team formation needs at least 2 "
+                          "so the discussion round can produce >= 2 competing hypotheses.")
+_parser.add_argument("--regenerate-heartbeats", nargs="?", const=".", default=None,
+                     metavar="RUN_DIR",
+                     help="Maintenance mode — launches nothing. Rebuild agents/*/HEARTBEAT.md in an "
+                          "EXISTING run directory (default: the current directory) from that run's "
+                          "own system/templates/. REQUIRED after a meta pass edits a "
+                          "system/templates/ROLE-*.md: without it the edit never reaches any agent.")
 _args = _parser.parse_args()
+
+# Maintenance mode is handled here, before ANY launch scaffolding (and before the
+# token load, which it does not need), so regenerating heartbeats for a live run
+# cannot re-register agents, re-copy files, or re-post a kickoff.
+if _args.regenerate_heartbeats is not None:
+    _written, _unchanged, _skipped = regenerate_heartbeats(_args.regenerate_heartbeats)
+    sys.exit(1 if _skipped else 0)
+
+if _args.cpu < 1:
+    _parser.error("--cpu must be >= 1")
+if _args.analysts < 2:
+    _parser.error("--analysts must be >= 2 (team formation needs >= 2 competing hypotheses)")
 
 # Load token after argparse so `--help` works without credentials.
 ADMIN_TOKEN = _load_token()
@@ -481,19 +705,26 @@ if len(PREFIX) > 16:
 # NOTE: the experiment-running agents are CPU-eval agents — their names are now
 # `_cpuN` (LAUNCH.md cpu_dispatch / periodic_hooks reference
 # `f"{PREFIX}_cpu{i}" for i in range(1, 7)`). Their role is "cpu" and they carry no
-# device index (gpu = -1). The "cpu" role loads ROLE-CPU.md via role_file_map below.
+# device index (gpu = -1). The "cpu" role loads ROLE-CPU.md via ROLE_FILE_MAP above.
+# Roster size is set by --cpu / --analysts (defaults 6 / 3). The orchestrator and the task profile
+# ENUMERATE agents from the run directory rather than hardcoding a range, so any size works without
+# editing runbook.md or task/LAUNCH.md. `server` is a cosmetic grouping label only.
+_SERVERS = ("server1", "server2", "server3")
+
 AGENTS = {
-    f"{PREFIX}_monitor":    ("Focus area monitor — bootstraps, forms teams, monitors health",   "monitor",   "server1", -1),
-    f"{PREFIX}_cpu1":     ("CPU-eval agent 1 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
-    f"{PREFIX}_cpu2":     ("CPU-eval agent 2 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server1", -1),
-    f"{PREFIX}_cpu3":     ("CPU-eval agent 3 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
-    f"{PREFIX}_cpu4":     ("CPU-eval agent 4 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server2", -1),
-    f"{PREFIX}_cpu5":     ("CPU-eval agent 5 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
-    f"{PREFIX}_cpu6":     ("CPU-eval agent 6 — evaluates candidate algo.py on the remote eval pool", "cpu",     "server3", -1),
-    f"{PREFIX}_analyst1": ("Analyst 1 — researches mechanisms, proposes experiments",        "analyst", "server1", -1),
-    f"{PREFIX}_analyst2": ("Analyst 2 — researches mechanisms, proposes experiments",        "analyst", "server2", -1),
-    f"{PREFIX}_analyst3": ("Analyst 3 — researches mechanisms, proposes experiments",        "analyst", "server3", -1),
+    f"{PREFIX}_monitor": ("Focus area monitor — health checks and stale-claim janitor (analysts form teams)",
+                          "monitor", _SERVERS[0], -1),
 }
+for _i in range(1, _args.cpu + 1):
+    AGENTS[f"{PREFIX}_cpu{_i}"] = (
+        f"CPU-eval agent {_i} — evaluates candidate algo.py on the remote eval pool",
+        "cpu", _SERVERS[(_i - 1) % len(_SERVERS)], -1,
+    )
+for _i in range(1, _args.analysts + 1):
+    AGENTS[f"{PREFIX}_analyst{_i}"] = (
+        f"Analyst {_i} — researches mechanisms, proposes experiments",
+        "analyst", _SERVERS[(_i - 1) % len(_SERVERS)], -1,
+    )
 
 NOW = datetime.now(timezone.utc).isoformat()
 
@@ -568,44 +799,13 @@ last_fitness: null
     if not memory_index.exists():
         memory_index.write_text("# Memory Index\n\n(no memories yet)\n")
 
-    # Build HEARTBEAT.md for this agent (self-contained: boot + role + team + record + exit)
-    system_dir = TEMPLATE_DIR / "system" / "templates"
-    heartbeat_template = (system_dir / "HEARTBEAT.md").read_text()
-
-    # Inject role-specific content
-    role_file_map = {
-        "gpu": "ROLE-CPU.md",   # legacy "gpu" role also maps to the CPU-eval doc
-        "cpu": "ROLE-CPU.md",   # CPU-eval agents use ROLE-CPU.md
-        "analyst": "ROLE-ANALYST.md",
-        "monitor": "ROLE-MONITOR.md",
-    }
-    role_src = system_dir / role_file_map.get(role, "ROLE-CPU.md")
-    role_content = role_src.read_text() if role_src.exists() else ""
-    # Strip frontmatter from role doc (already in heartbeat)
-    role_parts = role_content.split("---")
-    if len(role_parts) >= 3:
-        role_content = "---".join(role_parts[2:]).strip()
-
-    team_src = system_dir / "ROLE-TEAM.md"
-    team_content = ""
-    if team_src.exists():
-        team_content = team_src.read_text()
-        team_parts = team_content.split("---")
-        if len(team_parts) >= 3:
-            team_content = "---".join(team_parts[2:]).strip()
-
-    # Replace placeholders
-    heartbeat = heartbeat_template
-    heartbeat = heartbeat.replace(
-        "<!-- ROLE_CONTENT_PLACEHOLDER -->\n<!-- launch.py replaces this with system/templates/ROLE-{role}.md -->",
-        role_content
+    # Build HEARTBEAT.md for this agent (self-contained: boot + role + team + record + exit).
+    # This is a one-time render at launch: the agent reads this COPY, not the
+    # templates it was built from, so any later role-template edit needs
+    # `launch.py --regenerate-heartbeats <run-dir>` to reach it.
+    (agent_dir / "HEARTBEAT.md").write_text(
+        compose_heartbeat(role, TEMPLATE_DIR / "system" / "templates")
     )
-    heartbeat = heartbeat.replace(
-        "<!-- TEAM_CONTENT_PLACEHOLDER -->\n<!-- launch.py replaces this with system/templates/ROLE-TEAM.md -->",
-        team_content
-    )
-
-    (agent_dir / "HEARTBEAT.md").write_text(heartbeat)
 
     # Copy the baseline code repo for experiment-running agents (CPU-eval),
     # optional - only if a repo source exists.
@@ -661,11 +861,24 @@ def main():
         "name": WORKSHOP_NAME,
         "display_name": DISPLAY_NAME,
         "description": DESCRIPTION,
+        # These instructions are posted ONCE, at launch, and every agent reads them
+        # independently of the role templates — so they must state the SAME review
+        # protocol the role docs enforce. A stale rule here ("any comment clears an
+        # item") would be read as authoritative and would undo the two-person review
+        # gate no matter what ROLE-CPU / ROLE-ANALYST / HEARTBEAT say.
         "instructions": (
             "Multi-agent focus area for benchmark optimization.\n\n"
-            "Post types: [PROPOSAL], [RESULT], [DISCUSSION], [NEAR-MISS], [AUDIT]\n\n"
+            "Post types: [PROPOSAL], [RESULT], [DISCUSSION], [AUDIT], [SUGGESTION]\n"
+            "Review tags (COMMENTS on a [PROPOSAL], not posts): [REVIEW-OK], [REVIEW-BLOCK].\n"
+            "A review is a comment whose FIRST line begins with one of those two tags plus\n"
+            "real reasoning. Any other comment is ordinary discussion and clears nothing.\n\n"
             "Rules:\n"
-            "- Discussion before queuing: post [PROPOSAL] and get 1+ comment first\n"
+            "- Review before claiming: an item is claimable only after a NON-AUTHOR [REVIEW-OK]\n"
+            "  on its proposal post, with no unresolved [REVIEW-BLOCK]. Never review your own\n"
+            "  proposal, and never claim an item whose ONLY [REVIEW-OK] is your own — a second\n"
+            "  independent [REVIEW-OK] makes it claimable by anyone, including a reviewer.\n"
+            "- One [REVIEW-BLOCK] outweighs any number of [REVIEW-OK]s. Only an analyst clears\n"
+            "  a block, explicitly and with a stated reason — another [REVIEW-OK] does not.\n"
             "- One change per experiment: apply champion config, then ONE modification\n"
             "- Results are write-once: never overwrite\n"
         ),
@@ -745,8 +958,12 @@ def main():
     put_file(ws_id, "task.md", task_md)
 
     put_file(ws_id, "champion.md", f"""---
-metric: null
-run_id: null
+metric_name: fitness
+metric_value: null
+test_metric_value: null
+direction: minimize
+experiment_id: null
+run_id: "{RUN_ID}"
 agent: null
 updated_at: "{NOW}"
 status: awaiting_baseline
@@ -756,7 +973,23 @@ settings: {{}}
 # Champion Configuration
 
 No champion yet. The first agent to run the baseline will establish it.
-Check task/TASK.md for the optimization metric and baseline instructions.
+Check task/TASK.md for the optimization metric and the promotion contract.
+
+## Anchors
+
+Promotion requires BOTH anchors to advance together:
+
+- `metric_value` — TRAIN fitness (= `mean_rel_steps`; lower is better).
+- `test_metric_value` — HELD-OUT TEST fitness, from the same frozen candidate
+  re-evaluated with `--split test`.
+
+A candidate is promoted only when (a) train improves by >= 1e-3, (b) test improves
+by > 1e-4 against `test_metric_value`, and (c) the test run has `is_valid == 1`.
+A candidate that improves on train but fails (b) or (c) is `REJECTED_TEST`: its
+mechanism family is recorded in the team's `non_generalizable.md` and abandoned.
+
+While `status: awaiting_baseline` is present there is no valid champion, and the
+first candidate that is valid on BOTH splits seeds both anchors.
 """)
 
     put_file(ws_id, "knowledge/patterns.md", f"""---

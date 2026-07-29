@@ -24,7 +24,7 @@ A **focus area** is a group of AI agents collaborating on an optimization proble
 ## How It Works
 
 ```
-1. BOOTSTRAP    — Monitor creates workshop + main workspace + kickoff post
+1. BOOTSTRAP    — launch.py creates the workshop, roster, main workspace + kickoff post (no agent does this)
 2. DISCUSS      — All agents propose dimensions, debate, vote on teams
 3. EXECUTE      — Teams run experiments in parallel, share results
 4. ADAPT        — Stagnating teams restructure via discussion + vote
@@ -70,18 +70,41 @@ Agents may create additional files (analysis docs, hypothesis lists, etc.). Use 
 - **Posts for discussion** — proposals get debated before entering a queue
 - **Workspaces for state** — structured data with version history
 - **Notifications for alerts** — `notify_agents` on post creation
-- **PATCH for concurrency** — dot-notation frontmatter updates don't conflict
+- **PATCH for concurrency, but only on flat frontmatter** — dot-notation updates to a *flat,
+  single-key* frontmatter don't conflict. **NEVER PATCH `queue.md`**, or any file whose frontmatter
+  holds nested structures or lists: a dotted-key PATCH (`claims.agent_1`) flattens the `pending:`
+  list and destroys other teams' entries. Those files use **read-modify-PUT with `If-Match`** — see
+  `templates/ROLE-TEAM.md` § Team Queue (queue.md)
 - **Client-side YAML parsing** — the API stores files as raw text. Agents must parse YAML frontmatter themselves (see `API-REFERENCE.md`)
-- **Champion propagation** — orchestrator copies the winning `algo.py` to `{FOCUS_ROOT}/champion/algo.py` after each KEEP. All CPU-eval agents read from this canonical path
+- **Champion propagation** — on a KEEP, the winning CPU-eval agent writes `champion.md` AND copies its own candidate to `{FOCUS_ROOT}/champion/algo.py` itself, per `templates/ROLE-CPU.md` Step 7b1. The orchestrator never writes `champion/`. All CPU-eval agents read from this canonical path
 
-## Discussion-Before-Queuing Rule
+## Review-Before-Claiming Rule
 
-Every experiment MUST start as a `[PROPOSAL]` post. At least 1 team member must comment before it enters the team queue. This ensures peer review of ideas before spending eval time.
+Every experiment MUST start as a `[PROPOSAL]` post, and every queue item carries
+`review_status: pending | ok | blocked`. **Only `ok` is claimable.** An item becomes `ok` when a
+**non-author** — from any team, analyst or cpu-eval — comments on its `[PROPOSAL]` with a verdict:
+
+- `[REVIEW-OK]` + substantive reasoning → claimable
+- `[REVIEW-BLOCK]` + substantive reasoning → moved out of `pending:` into `blocked:`; only an
+  analyst clears it, explicitly and with a stated reason. Another `[REVIEW-OK]` does **not**.
+- an untagged comment is **not** a review and changes nothing
+
+There is no path to claiming an unreviewed item — no time grace, no starvation override. An idle
+rotation is cheaper than an eval spent on a mechanism nobody checked. Two consequences follow:
+
+- Reviewing is a **backlog to drain, not a quota to fill.** On spawn each non-monitor agent reviews
+  the oldest still-`pending` items it did not propose, up to `REVIEW_CAP`, and posts nothing when
+  the backlog is empty. A padded, content-free review defeats the whole gate.
+- An agent may not claim an item when its own `[REVIEW-OK]` is the **only** one on it — that would
+  be self-service. A second independent review makes it claimable by anyone.
+
+An item naming no `proposal_post` is **unreviewable**, not waiting: there is no post for a review to
+attach to, so it can never become claimable. Repairing such a row is an analyst job.
 
 ## Cross-Team Coordination
 
 1. All results go to **main workspace** `results/` — visible to every team
-2. **Near-misses** (delta < threshold) trigger cross-team joint experiments
+2. A **`NEAR_MISS` outcome** (candidate passed BOTH gates but lost the promotion race) needs no cross-team action — the cpu-eval agent auto-re-queues it as `{exp_id}_stack` against the new champion
 3. **KEEP results** (new champion) update main `champion.md` — all teams rebase
 4. Monitor posts periodic `[AUDIT]` summarizing all team progress
 
