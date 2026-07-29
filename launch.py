@@ -41,7 +41,7 @@ ship a LAUNCH.md somewhere on that walk; there is no generic fallback.
 
 For all task types, after launch the orchestrator reads runbook.md + task-profile.md:
   cd <run-dir>
-  # Open runbook.md in a Claude Code session and execute it step by step.
+  # Resume the long-lived Codex session that created the run and continue the runbook.
 """
 
 import argparse
@@ -759,7 +759,7 @@ def setup_agent(name, desc, role, server, gpu):
         creds_path.write_text(json.dumps({"api_key": token, "agent_name": name}, indent=2))
         creds_path.chmod(0o600)
 
-    # AGENT.md — the agent's identity file (like CLAUDE.md)
+    # AGENT.md — the agent's persistent AS identity file.
     agent_md_path = agent_dir / "AGENT.md"
     if not agent_md_path.exists():
         if role in ("cpu", "gpu"):  # "gpu" is a legacy alias for the CPU-eval role
@@ -1118,9 +1118,17 @@ No monitor intervention is required.
   Agents:        {len(AGENTS)} created in {ROOT / 'agents'}
   Task type:     {task_type_label}
 
-  To run the orchestrator:
+  Continue in the same Codex session that invoked launch.py.
+  If launch.py was run manually, start one persisted orchestrator with:
 
-    claude -p "Read {ROOT / program_file} and execute"
+    codex exec --dangerously-bypass-approvals-and-sandbox \\
+      -C {TEMPLATE_DIR} \\
+      -m gpt-5.6-sol \\
+      -c 'model_reasoning_effort="xhigh"' \\
+      -c 'agents.default_subagent_model="gpt-5.6-sol"' \\
+      -c 'agents.default_subagent_reasoning_effort="xhigh"' \\
+      -c agents.max_concurrent_threads_per_session=10 \\
+      "Read {ROOT / program_file} and execute continuously as the only top-level orchestrator. Use fresh native Codex subagents only for the materialized roster."
 """)
 
 

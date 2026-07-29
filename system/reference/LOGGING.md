@@ -67,7 +67,7 @@ Always write all 16 keys, using `null` for what could not be determined.
 │   ├── experiments.jsonl       ← CANONICAL (orchestrator writes)
 │   ├── sessions.jsonl          ← One line per agent session (orchestrator writes)
 │   └── raw/
-│       └── {agent}_{timestamp}.log  ← Raw stdout/stderr per session
+│       └── {agent}_{timestamp}_{nonce}.json  ← Native child completion artifact
 │
 ├── agents/{name}/
 │   └── actions.md              ← Human-readable session history per agent
@@ -218,15 +218,27 @@ These bind every consumer of the ledger — the queries below, runbook Step 5g, 
 5. **`NEAR_MISS` stays in the rate denominators** (it is a real experiment that cleared both gates)
    but is excluded from the *stagnation window*, per the paragraph above.
 
-## 3. Raw Logs
+## 3. Native cycle-child completion artifacts
 
-**Written by:** Orchestrator, capturing agent stdout/stderr.
-**Location:** `{FOCUS_ROOT}/logs/raw/{agent}_{YYYYMMDD}_{HHMMSS}.log`
+**Written by:** Orchestrator for each analyst or CPU-eval cycle child harvested in runbook Step 5d.
+**Location:** `{FOCUS_ROOT}/logs/raw/{agent}_{timestamp}_{nonce}.json`
 
-```bash
-# Orchestrator captures:
-claude -p "..." 2>&1 | tee logs/raw/${AGENT}_$(date +%Y%m%d_%H%M%S).log
+```json
+{
+  "agent": "run01_cpu1",
+  "cycle": 3,
+  "codex_target": "/root/run01_cpu1_cpu_cycle_3_a1b2c3d4e5f60718",
+  "codex_agent_id": null,
+  "codex_task_name": "run01_cpu1_cpu_cycle_3_a1b2c3d4e5f60718",
+  "terminal_status": "completed",
+  "promise_received": true,
+  "final_message": "<promise>run01_cpu1 cycle complete (branch=normal)</promise>",
+  "ended_at": "2026-07-29T12:00:00+00:00"
+}
 ```
+
+This is the run-local handoff evidence available from a native Codex child, not a full stdout/tool
+transcript. The full child thread remains attached to the persisted parent Codex session.
 
 ## 4. agents/{name}/actions.md — Per-Agent History
 

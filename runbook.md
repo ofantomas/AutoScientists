@@ -24,6 +24,7 @@ Once the run is live (Step 3 onward), this is the **complete** list of files you
 |---|---|---|
 | `logs/experiments.jsonl` | append-only, one row per experiment, via the `cycle_ledger` hook | Step 5d |
 | `logs/sessions.jsonl` | append-only, one row per finished agent session | Step 5d |
+| `logs/raw/{agent}_{timestamp}_{nonce}.json` | write-once native child completion artifact | Step 5d |
 | run-level metadata you created yourself and no agent reads (scratch notes under `FOCUS_ROOT`) | free | any |
 | a team's `queue.md` **seed items** | additive only — append to `pending:`, touch nothing else | Step 4 only, and only if the `seeding_policy` hook says *orchestrator-seeded* |
 
@@ -136,6 +137,35 @@ task/TASK.md                       — the task problem definition
 task-profile.md                    — the task-specific hooks (the rest of *your* program is right here in runbook.md)
 ```
 
+### Codex subagent dispatch
+
+Every roster launch below uses Codex's native `spawn_agent` tool. Treat the Python-shaped
+blocks as launch specifications, not as shell commands:
+
+- Spawn every independent child in the wave before waiting and retain the canonical target returned
+  for each AS identity (plus an opaque child ID if the installed tool emits one). Repeatedly call
+  `wait_agent` with a bounded timeout (at most 60 seconds), then call `list_agents` and match each
+  retained target to `agent_name` and `agent_status`. Continue until every child in the wave has a
+  terminal state. A `wait_agent` timeout is only a polling wake-up; it is not an agent failure and
+  is never, by itself, a reason to interrupt or relaunch a child.
+- Set `fork_turns="none"` so every roster invocation is a fresh session; continuity comes from
+  the agent's run-local files and workshop state.
+- Use a unique Codex task name for every invocation. The AS identity in the prompt remains
+  unchanged.
+- Leave the per-spawn model and reasoning effort unset. The top-level `codex exec` command pins
+  both parent and children to GPT-5.6-Sol at `xhigh`.
+
+```python
+import re
+from uuid import uuid4
+
+def codex_task_name(agent_name, phase, cycle=None):
+    """Unique Codex-internal child name; never changes the AS agent identity."""
+    suffix = f"_{cycle}" if cycle is not None else ""
+    base = re.sub(r"[^a-z0-9_]", "_", f"{agent_name}_{phase}{suffix}".lower())
+    return f"{base}_{uuid4().hex[:16]}"
+```
+
 ## Step 3 — Dimension discussion
 
 → PROFILE HOOK: `discussion_policy` (defines whether discussion runs, when, and any extra prompt content)
@@ -154,44 +184,38 @@ non_admin_agents = [a for a in os.listdir(_agents_dir)
                     and os.path.isdir(os.path.join(_agents_dir, a))
                     and "monitor" not in a]
 
+discussion_children = {}
 for agent_name in non_admin_agents:
-    Agent(
-        description=f"{agent_name} discussion",
-        prompt=(
+    discussion_children[agent_name] = spawn_agent(
+        task_name=codex_task_name(agent_name, "discussion"),
+        message=(
             f"You are {agent_name}.\n"
             f"FOCUS_ROOT={FOCUS_ROOT}\n"
             f"MODE=discussion\n"  # REQUIRED — routes the agent to HEARTBEAT Part 2
             f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
             f"You MUST start at Part 0 (Mode Selector). Do not skip ahead.\n"
+            f"Do not spawn additional subagents; execute this roster role yourself.\n"
             f"{extra_discussion_instructions}"   # from the profile hook
         ),
-        run_in_background=True,
-        # model UNSET on purpose → the subagent inherits the orchestrator's model.
+        fork_turns="none",
     )
+# All children are now running in parallel. Apply the wait/list protocol above to their targets.
 ```
 
-> **Model choice.** The orchestrator is launched with `--model claude-opus-5`, and
-> **every `Agent()` / `Task()` call in this runbook leaves `model` unset on
-> purpose** so subagents inherit Opus 5. Never pin a model in a launch call — a
-> pin silently downgrades part of the roster and makes cycles incomparable.
+> **Model choice.** The orchestrator is launched with `-m gpt-5.6-sol`. The launch command also
+> sets `agents.default_subagent_model="gpt-5.6-sol"`, and every `spawn_agent` call leaves
+> `model` unset on purpose. Never pin a different model in a launch call — a quiet downgrade on
+> part of the roster makes cycles incomparable.
 >
-> **Reasoning effort.** This run is launched at `--effort xhigh` (Anthropic's recommended setting for coding/agentic work on Opus 5; `max` can overthink and shows diminishing returns). The orchestrator is only a
-> coordinator; the reasoning that matters happens in the ten subagents, so the effort must reach
-> THEM. On your first cycle, check whether your `Agent()` / `Task()` tool exposes an `effort`
-> parameter — you can see your own tool schema and this runbook's author could not:
->   - **If it does:** pass `effort="xhigh"` on EVERY agent launch, every cycle, for every role.
->   - **If it does not:** leave it unset — subagents then inherit the session's effort, which is
->     already xhigh. Do NOT invent a parameter the tool does not accept; an unknown kwarg fails the
->     launch and costs the whole rotation.
-> State which case applies in your first cycle's summary so it is on the record. Whichever branch
-> you take, never pass an effort BELOW the session's — a quiet downgrade on part of the roster
-> makes cycles incomparable in exactly the way a model pin does.
-> Haiku-class agents have a documented "describe instead of do" failure mode in
+> **Reasoning effort.** The top-level command sets both `model_reasoning_effort="xhigh"` and
+> `agents.default_subagent_reasoning_effort="xhigh"`. Leave the per-spawn effort unset so that
+> enforced default reaches every role. Do not substitute a smaller/faster model: such agents have
+> shown a "describe instead of do" failure mode in
 > this workflow: they write elaborate local memory files claiming the work is
 > done but never call the workshop API, leaving the queue unrefilled. Empirically
-> reproduced in the 2026-05-26 gpt-nano-agents run — three of three haiku
+> reproduced in the 2026-05-26 gpt-nano-agents run — three of three Haiku-class
 > analysts hallucinated "no API available in this environment." Reserve
-> haiku-class models for deterministic mechanical work outside this loop.
+> smaller models for deterministic mechanical work outside this loop.
 
 **`MODE=discussion` is mandatory.** Without it, the heartbeat's Mode Selector cannot route CPU-eval agents to the Discussion branch, and they will fall through to "no team → exit" or freelance experiments.
 
@@ -205,17 +229,20 @@ monitor nor this orchestrator writes that file — the monitor launch below is a
 formation step.
 
 ```python
-Agent(
-    description="monitor health pass",
-    prompt=(
+bootstrap_monitor = spawn_agent(
+    task_name=codex_task_name(f"{PREFIX}_monitor", "bootstrap"),
+    message=(
         f"You are {PREFIX}_monitor.\n"
         f"FOCUS_ROOT={FOCUS_ROOT}\n"
         f"MODE=execute\n"
         f"Read {FOCUS_ROOT}/agents/{PREFIX}_monitor/HEARTBEAT.md and follow it.\n"
         f"You MUST start at Part 0 (Mode Selector).\n"
+        f"Do not spawn additional subagents; execute this roster role yourself.\n"
         f"{extra_monitor_instructions}"   # from the profile hook
     ),
+    fork_turns="none",
 )
+# Apply the wait/list protocol above to bootstrap_monitor before continuing.
 ```
 
 Verify teams were formed — with a bounded recovery, never a bare assert. A slow bootstrap (an
@@ -234,23 +261,26 @@ def relaunch_analysts_for_formation():
     """Re-run the discussion branch for analysts only. Step 0.25 is idempotent:
     if a roster already exists it reforms nothing without a converged trigger."""
     analysts = [a for a in os.listdir(FOCUS_ROOT / "agents") if "analyst" in a]
+    formation_children = {}
     for agent_name in analysts:
-        Agent(
-            description=f"{agent_name} team formation",
-            prompt=(
+        formation_children[agent_name] = spawn_agent(
+            task_name=codex_task_name(agent_name, "formation_retry"),
+            message=(
                 f"You are {agent_name}.\n"
                 f"FOCUS_ROOT={FOCUS_ROOT}\n"
                 f"MODE=discussion\n"
                 f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
                 f"You MUST start at Part 0 (Mode Selector).\n"
+                f"Do not spawn additional subagents; execute this roster role yourself.\n"
                 f"teams/roster.md is still empty. HEARTBEAT 2b3 -> ROLE-ANALYST Step 0.25 "
                 f"is the ONLY writer of that file; run it this cycle.\n"
             ),
-            run_in_background=True,
-            # model UNSET on purpose → inherits the orchestrator's model.
+            fork_turns="none",
         )
+    return formation_children
 
 # Poll first — formation may simply not have landed yet.
+formation_children = {}
 teams = read_teams()
 for _ in range(10):            # ~10 min
     if len(teams) >= 2:
@@ -260,12 +290,16 @@ for _ in range(10):            # ~10 min
 
 if len(teams) < 2:
     print("[BOOTSTRAP] roster still empty after polling — relaunching analysts once")
-    relaunch_analysts_for_formation()
+    formation_children = relaunch_analysts_for_formation()
     for _ in range(20):        # ~20 min for the retry round
         time.sleep(60)
         teams = read_teams()
         if len(teams) >= 2:
             break
+
+# REQUIRED ORCHESTRATOR ACTION: if formation_children is non-empty, apply the native
+# wait_agent/list_agents protocol above to those retained targets before leaving bootstrap. The roster
+# file landing is not itself proof that every retry child exited.
 
 if len(teams) < 2:
     raise RuntimeError(
@@ -312,9 +346,9 @@ while True:
 
 ### 5b. Launch analysts IN PARALLEL
 
-Analysts run on CPU. **Leave `model` unset so they inherit Opus 5; never pin a
-haiku-class model** — see the model note in Step 3. Launch every analyst on the
-roster in a single message and wait.
+Analysts run on CPU. **Leave `model` and reasoning effort unset so the enforced
+GPT-5.6-Sol / `xhigh` child defaults apply** — see the model note in Step 3.
+Spawn every analyst before waiting, then wait for the whole wave.
 
 **Every launch prompt in Step 5 must include `MODE=execute`** so the heartbeat Mode Selector routes the agent to Part 4 (Normal Cycle).
 
@@ -329,24 +363,24 @@ analysts = sorted(a for a in os.listdir(_agents_dir)
                   and os.path.isdir(os.path.join(_agents_dir, a))
                   and "_analyst" in a)
 
-# Send ONE message with a Task call per analyst (parallel)
+# Spawn the full analyst wave before waiting.
+analyst_children = {}
 for analyst_name in analysts:
-    Task(
-        subagent_type="general-purpose",
-        # model UNSET on purpose → inherit the orchestrator's model (Opus 5). Analysts do the
-        # creative hypothesis/proposal work — the hardest job — so they get the same model.
-        description=f"{analyst_name} cycle",
-        prompt=(
+    analyst_children[analyst_name] = spawn_agent(
+        task_name=codex_task_name(analyst_name, "analyst_cycle", cycle_count),
+        message=(
             f"You are {analyst_name}.\n"
             f"FOCUS_ROOT={FOCUS_ROOT}\n"
             f"MODE=execute\n"
             f"Read {FOCUS_ROOT}/agents/{analyst_name}/HEARTBEAT.md and follow it.\n"
             f"Start at Part 0 (Mode Selector).\n"
+            f"Do not spawn additional subagents; execute this roster role yourself.\n"
             f"{analyst_prompt_extras}"   # ← PROFILE HOOK
-            f"When done: <promise>{analyst_name} cycle complete</promise>"
+            f"When done, emit the branch-qualified promise required by HEARTBEAT Part 6e."
         ),
+        fork_turns="none",
     )
-# Wait for all of them to complete.
+# Apply the wait/list protocol above to every returned target before dispatching CPU-eval agents.
 ```
 
 → PROFILE HOOK: `analyst_prompt_extras` (extra env vars, deadline reminders, diversity rules — append to the prompt)
@@ -362,16 +396,66 @@ This is the biggest variation between profiles, so the entire body lives in the 
 
 ### 5d. Wait, log sessions, then write the experiment ledger
 
-When each agent finishes, append a session record:
+When each agent finishes, use the retained spawn result plus the child's terminal notification to
+write one run-local completion artifact, then append the existing session record. The artifact is
+not a full tool transcript (that remains in the persisted parent Codex session), but it binds the
+logical AS identity to the native child and its returned result:
 
 ```python
+# `children` is the wave mapping being harvested (`analyst_children` or
+# `cpu_children`); `agents_snapshot` is the latest `list_agents()` result.
+spawn_result = children[agent_name]
+codex_target = spawn_result["task_name"]
+codex_agent_id = spawn_result.get("agent_id")  # None in Codex builds that return only task_name
+child_record = next(a for a in agents_snapshot["agents"]
+                    if a["agent_name"] == codex_target)
+native_status = child_record["agent_status"]
+
+# list_agents exposes a terminal completion/error as a one-key object. `interrupted`
+# is also terminal but has no returned text. Anything else is still pending/running
+# and must not be logged as finished.
+if isinstance(native_status, dict) and len(native_status) == 1:
+    child_terminal_status, child_final_message = next(iter(native_status.items()))
+    if child_terminal_status not in ("completed", "errored"):
+        raise RuntimeError(f"unknown Codex terminal status: {native_status!r}")
+elif native_status == "interrupted":
+    child_terminal_status, child_final_message = "interrupted", None
+else:
+    raise RuntimeError(f"child is not terminal: {codex_target} {native_status!r}")
+
+expected_promise = re.compile(
+    rf"<promise>{re.escape(agent_name)} cycle complete \(branch=[^)]+\)</promise>"
+)
+promise_received = (child_terminal_status == "completed"
+                    and expected_promise.search(child_final_message or "") is not None)
+ended_at = datetime.now(timezone.utc).isoformat()
+completion = {
+    "agent": agent_name,
+    "cycle": cycle_count,
+    "codex_target": codex_target,              # list_agents.agent_name / canonical task path
+    "codex_agent_id": codex_agent_id,          # null if this CLI emits no separate opaque ID
+    "codex_task_name": codex_target.rsplit("/", 1)[-1],
+    "terminal_status": child_terminal_status,
+    "promise_received": promise_received,
+    "final_message": child_final_message,      # null only if the native completion omitted it
+    "ended_at": ended_at,
+}
+raw_name = f"{agent_name}_{ended_at.replace(':', '')}_{uuid4().hex[:16]}.json"
+raw_path = FOCUS_ROOT / "logs" / "raw" / raw_name
+raw_path.write_text(json.dumps(completion, ensure_ascii=False, indent=2) + "\n")
+
 session = {
     "agent": agent_name,
     "cycle": cycle_count,
     "started_at": started_at,
-    "ended_at": datetime.now(timezone.utc).isoformat(),
+    "ended_at": ended_at,
     "status": "success" if promise_received else "timeout",
     "promise_received": promise_received,
+    "codex_target": codex_target,
+    "codex_agent_id": codex_agent_id,
+    "codex_task_name": codex_target.rsplit("/", 1)[-1],
+    "terminal_status": child_terminal_status,
+    "completion_artifact": str(raw_path.relative_to(FOCUS_ROOT)),
 }
 with open(FOCUS_ROOT / "logs" / "sessions.jsonl", "a") as f:
     f.write(json.dumps(session) + "\n")
@@ -493,21 +577,24 @@ Then launch the rostered monitor — it is in the roster, so this is not an ad-h
 ROLE-MONITOR expects exactly one invocation per cycle:
 
 ```python
-Agent(
-    description="monitor health pass",
-    prompt=(
+monitor_child = spawn_agent(
+    task_name=codex_task_name(f"{PREFIX}_monitor", "health", cycle_count),
+    message=(
         f"You are {PREFIX}_monitor.\n"
         f"FOCUS_ROOT={FOCUS_ROOT}\n"
         f"MODE=execute\n"
         f"Read {FOCUS_ROOT}/agents/{PREFIX}_monitor/HEARTBEAT.md and follow it.\n"
         f"You MUST start at Part 0 (Mode Selector).\n"
+        f"Do not spawn additional subagents; execute this roster role yourself.\n"
         + (f"Stale-claim CANDIDATES from my read-only scan: {json.dumps(stale)}. "
            f"Advisory only — age plus 'no result file'. Re-resolve each one yourself and "
            f"release only those whose holder's session has demonstrably ended.\n"
            if stale else "")
         + extra_monitor_instructions   # from the profile hook
     ),
+    fork_turns="none",
 )
+# Apply the wait/list protocol above to monitor_child before continuing.
 ```
 
 The cpu-eval agent whose claim went stale is not "unstuck" by you: it is relaunched by the next

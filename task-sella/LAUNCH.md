@@ -368,7 +368,7 @@ pool, NOT by any device — multiple cpu-eval agents may run concurrently. Each 
 `scp`'d to a **unique** remote path (`/tmp/cand_${AGENT}_${exp}.py`) so concurrent evals never
 collide.
 
-For each cpu-eval agent, launch in its own message:
+Spawn every cpu-eval agent with Codex's native `spawn_agent` tool before waiting:
 
 ```python
 # Enumerate the ACTUAL roster from disk — launch.py sizes it via --cpu / --analysts,
@@ -382,19 +382,23 @@ eval_agents = sorted(a for a in os.listdir(f"{FOCUS_ROOT}/agents") if "_cpu" in 
 # MODE=execute to run the shared baseline, before extended discussion; then
 # dispatch the rest against the seeded queues.
 
+cpu_children = {}
 for agent_name in eval_agents:
-    Task(
-        subagent_type="general-purpose",
-        description=f"{agent_name} experiment",
-        prompt=(
+    cpu_children[agent_name] = spawn_agent(
+        task_name=codex_task_name(agent_name, "cpu_cycle", cycle_count),
+        message=(
             f"You are {agent_name}.\n"
             f"FOCUS_ROOT={FOCUS_ROOT}\n"
             f"MODE=execute\n"
             f"Read {FOCUS_ROOT}/agents/{agent_name}/HEARTBEAT.md and follow it.\n"
             f"Start at Part 0 (Mode Selector).\n"
-            f"When done: <promise>{agent_name} cycle complete</promise>"
+            f"Do not spawn additional subagents; execute this roster role yourself.\n"
+            f"When done, emit the branch-qualified promise required by HEARTBEAT Part 6e."
         ),
+        fork_turns="none",
     )
+# All CPU-eval children are now running in parallel. Step 5d applies the runbook's wait/list
+# protocol to every returned target.
 ```
 
 No CUDA device pinning, no `CUDA_VISIBLE_DEVICES`, no per-device serialization. HEARTBEAT.md tells

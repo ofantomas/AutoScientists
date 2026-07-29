@@ -1347,8 +1347,8 @@ if our_metric is None and (out := pending_result.get("stdout_path")):
 # holder: run none of it — no gate, no test eval, no queue write, no post — and go to Part 6.
 # This MIRRORS ROLE-CPU Step 5 — same margins, same seeding rule, same validity
 # convention. Do NOT invent a different rule here.
-#   * `diff_applied: false` in the sentinel (Step 4's edit didn't land — Edit reported
-#     old_string not found, patch -p1 rejected hunks, algo.py identical to champion)
+#   * `diff_applied: false` in the sentinel (Step 4's edit didn't land — edit context
+#     not found, patch rejected hunks, algo.py identical to champion)
 #     ⇒ the recorded metric is the UNCHANGED baseline, not evidence. FAILED.
 #   * `fitness` still None after the 5a salvage ⇒ no usable measurement at all. FAILED.
 #     (Never fall through to a comparison with None — that either raises TypeError or

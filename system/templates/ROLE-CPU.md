@@ -1043,7 +1043,7 @@ whether to run this experiment or pick a lighter one from the queue instead.
 ### Step 4 — Apply Change and Evaluate
 
 Apply ONE change from the experiment's diff to `algo.py`, then **block synchronously** on the remote
-eval. Detached / fire-and-forget evaluation is forbidden: if the agent's claude session ends before
+eval. Detached / fire-and-forget evaluation is forbidden: if the agent session ends before
 parsing the eval JSON, the real metric is computed but never recorded — the entire cycle's work
 vanishes. The agent MUST wait for the `ssh` eval call to return and then run Steps 5–8 in the same
 session.
@@ -1126,7 +1126,7 @@ Say plainly in the result file and the [RESULT] post that the cycle was aborted 
 check, and which part of the proposal tripped it, so the analyst can re-propose a continuous form.
 Step 6 re-queues the item; it is never a dead end and never a stagnation tick.
 
-**Before evaluating, verify the diff actually landed.** If the Edit tool said `old_string not found`,
+**Before evaluating, verify the diff actually landed.** If the code edit failed, `apply_patch` or
 `patch -p1` printed `FAILED` / `Hunk #N FAILED`, or the resulting `algo.py` is byte-identical to
 `champion/algo.py`, the proposal was NOT tested — evaluation would just re-measure the baseline. Set
 `item["diff_applied"] = False`, skip evaluation, and post `[RESULT] {exp_id}: FAILED` so the proposal
@@ -1633,7 +1633,7 @@ have_valid_champion = (champ_status != "awaiting_baseline") and \
 current_best = float(champ_fitness) if have_valid_champion else None
 
 # IMPORTANT: a result is only meaningful if the proposed diff actually applied.
-# If Step 4's edit failed (old_string not found, patch rejected, algo.py identical
+# If Step 4's edit failed (edit context not found, patch rejected, algo.py identical
 # to champion), the score you measured is the UNCHANGED baseline — NOT evidence
 # about the proposal.
 diff_applied = bool(item.get("diff_applied", True))  # default True for legacy items
@@ -2975,4 +2975,3 @@ ordinary `[RESULT]` post (Step 8) like every other outcome.
 **One experiment per session.** A cycle costs up to two evals on shared infrastructure — the train
 split always, plus the held-out test split on a provisional keep. After Step 8b, finish the session —
 do not go back to Step 2 for a second experiment.
-

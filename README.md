@@ -4,7 +4,7 @@
 
 **AutoScientists** is a decentralized team of AI agents for long-running computational scientific experimentation. Unlike prior agent systems that follow a single research trajectory or coordinate through a central planner, AutoScientists agents **self-organize into teams** around promising hypotheses, **critique each other's proposals** before spending experimental compute, and **share successes and failures** so the system avoids redundant exploration and sustains parallel search as evidence accumulates over hours or days.
 
-This repository packages the system as [Claude Code](https://docs.claude.com/claude-code) subagents coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). The orchestrator is a pure coordinator — it launches agents and harvests their results, never trains anything itself.
+This repository packages the system as [Codex](https://developers.openai.com/codex/cli) subagents coordinating through a local [ClawInstitute](https://www.npmjs.com/package/clawinstitute) server (workshops, workspaces, message-board posts). The orchestrator is a pure coordinator — it launches agents and harvests their results, never trains anything itself.
 
 ## Results
 
@@ -12,17 +12,14 @@ This repository packages the system as [Claude Code](https://docs.claude.com/cla
 - **nanoGPT training optimization**: **1.9× faster** to a target validation metric; 7 accepted improvements vs. 0 for a single-agent baseline.
 - **ProteinGym** fitness prediction: **+12.5%** on the ACE2-Spike binding assay; **+6.5%** averaged across all 217 assays.
 
-## Tasks
+## Task
 
-Three bundled task families (per-task data prep and details live in each `task-<name>/README.md`):
-
-- **`task-autoresearch/`** — open-ended nanoGPT `val_bpb` optimization, wrapping [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
-- **`task-biomlbench/`** — 24 biomedical ML benchmarks across drug discovery, protein engineering, single-cell omics, and biomedical imaging.
-- **`task-protein-gym/`** — ProteinGym Spike (SARS-CoV-2) fitness prediction, evolving a Kermut GP baseline.
+This branch bundles **`task-sella/`**, the Sella optimizer task with separate train and held-out
+test gates. Its deployment and launch details live in `task-sella/LAUNCH.md`.
 
 ## Setup
 
-Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and the [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`).
+Prerequisites: [Node.js 22+](https://nodejs.org/) (ships with `npx`), Python 3.9+, and the [Codex CLI](https://developers.openai.com/codex/cli) (`codex`).
 
 ```bash
 # Start the local ClawInstitute server (agents will all coordinate through this)
@@ -39,9 +36,17 @@ pip install -r requirements.txt
 From the repo root, in a separate shell:
 
 ```bash
-claude -p "Read runbook.md and execute. Task: task-autoresearch. Run name: ar_v1."
-claude -p "Read runbook.md and execute. Task: task-biomlbench/drug_discovery/tdcommons-lipophilicity-astrazeneca. Run name: lipo_v1."
-claude -p "Read runbook.md and execute. Task: task-protein-gym. Run name: spike_v1."
+CODEX_ENGINE_ARGS=(
+  --dangerously-bypass-approvals-and-sandbox
+  -m gpt-5.6-sol
+  -c 'model_reasoning_effort="xhigh"'
+  -c 'agents.default_subagent_model="gpt-5.6-sol"'
+  -c 'agents.default_subagent_reasoning_effort="xhigh"'
+  -c agents.max_concurrent_threads_per_session=10
+)
+
+codex exec "${CODEX_ENGINE_ARGS[@]}" \
+  "Read runbook.md and execute continuously. Task: task-sella. Run name: sella_v1."
 ```
 
 Each launch materializes a new sibling directory `../<run-name>/` with its own copy of the system, agents, workspace, and logs; the template itself stays clean across runs. Hardware requirements vary per task — see each `task-<name>/README.md`.
@@ -50,12 +55,17 @@ Each launch materializes a new sibling directory `../<run-name>/` with its own c
 
 Drop a `task-<name>/` directory at the repo root with two files:
 
-1. **`TASK.md`** — task spec. YAML frontmatter should set `task_type` (one of `optimization`, `biomlbench`, `proteingym`) and `name`; see the three bundled `task-*/TASK.md` files for the conventional shape. The markdown body describes the problem, data, and constraints for the agents to read.
-2. **`LAUNCH.md`** — task profile filling in the 13 hooks `runbook.md` references (`launch_command`, `discussion_policy`, `gpu_dispatch`, `champion_promotion`, `stagnation_response`, `exit_condition`, etc.). Easiest path: copy the bundled `task-<name>/LAUNCH.md` closest to your task and edit the hooks that need to differ.
+1. **`TASK.md`** — task spec. YAML frontmatter sets `task_type` and `name`; see
+   `task-sella/TASK.md` for the conventional shape. The body describes the problem, data, and
+   constraints for agents.
+2. **`LAUNCH.md`** — task profile filling in the hooks referenced by `runbook.md`
+   (`launch_command`, `discussion_policy`, `cpu_dispatch`, `champion_promotion`,
+   `stagnation_response`, `exit_condition`, etc.). Copy `task-sella/LAUNCH.md` and change only
+   the hooks that differ.
 
-Optionally add a setup script to fetch baseline code or data — see `task-autoresearch/download_repo.sh` or `task-protein-gym/download_data.sh` for examples.
-
-Then launch with `--task task-<name>`. `launch.py` walks up from the `--task` path to find the nearest `LAUNCH.md`, so a family-level `LAUNCH.md` can cover many subtasks (as `task-biomlbench/` does for its 24 subtasks) while any specific subtask can override by shipping its own `LAUNCH.md`.
+Then launch with `Task: task-<name>` in the Codex prompt. `launch.py` walks up from the task path
+to find the nearest `LAUNCH.md`, so a family-level profile can cover multiple subtasks while a
+specific subtask may override it with its own `LAUNCH.md`.
 
 ## Citation
 

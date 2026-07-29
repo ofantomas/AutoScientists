@@ -22,7 +22,7 @@ The concrete values for this run are pinned in
 ## 0. How the system is wired (read this first)
 
 AS for this task has **two independent planes**. They never share a process and talk over the
-network in exactly two ways: the orchestrator launches Claude Code subagents, and the CPU-eval agents
+network in exactly two ways: the Codex orchestrator launches native subagents, and the CPU-eval agents
 `ssh` into the eval head to score candidates.
 
 ```
@@ -30,8 +30,8 @@ network in exactly two ways: the orchestrator launches Claude Code subagents, an
  ┌───────────────────────────────────────┐           ┌──────────────────────────────────────────┐
  │ Coordinator host                       │           │ Eval head                                  │
  │                                        │  ssh +     │                                            │
- │  claude  ── orchestrator (runbook.md)  │  scp algo  │  redis-server  (eval queue)                │
- │    │  spawns Claude Code subagents:    │ ─────────▶ │  distributed_validate workers (consume)    │
+ │ codex exec ─ orchestrator (runbook.md) │  scp algo  │  redis-server  (eval queue)                │
+ │    │  spawns native Codex subagents:   │ ─────────▶ │  distributed_validate workers (consume)    │
  │    ├─ 1 monitor                        │            │  eval_candidate.py  (producer, per call)   │
  │    ├─ 6 cpu-eval  ───────────────────────────────▶ │  opt_problem sella checkout + molecules/   │
  │    └─ 3 analysts                       │            └──────────────────────────────────────────┘
@@ -43,7 +43,7 @@ network in exactly two ways: the orchestrator launches Claude Code subagents, an
                                                       └──────────────────────────────────────────┘
 ```
 
-- **Coordination plane** runs on the **coordinator**: the `claude` orchestrator, the 10 Claude Code
+- **Coordination plane** runs on the **coordinator**: the `codex exec` orchestrator, the 10 Codex
   subagents (a fixed roster set by `launch.py`: 1 monitor + 6 cpu-eval + 3 analysts), and the
   **ClawInstitute** server — a local message-board/workspace API on `http://localhost:3000` that is
   the agents' shared brain. *No xTB here.*
@@ -70,7 +70,7 @@ them in every shell where you run the commands below.
 
 ```bash
 # --- Coordination plane ---
-COORD_HOST=<your-laptop>          # runs ClawInstitute + the claude orchestrator + the 10 subagents
+COORD_HOST=<your-laptop>          # runs ClawInstitute + the Codex orchestrator + the 10 subagents
 
 # --- Evaluation plane (SHARED; must agree with system/templates/ROLE-CPU.md — see note) ---
 EVAL_HOST=cpu-33                  # ssh alias for a002dc-0002: Redis head + eval_candidate.py
@@ -172,7 +172,7 @@ Do **not** "fix" `/home/tsypin/opt_problem_optbench/validate.py`. It is shared; 
 
 | Role | Host | Ports | Runs |
 |---|---|---|---|
-| Coordinator | `$COORD_HOST` | 3000 (ClawInstitute) | `claude` orchestrator + 10 subagents + ClawInstitute |
+| Coordinator | `$COORD_HOST` | 3000 (ClawInstitute) | `codex exec` orchestrator + 10 subagents + ClawInstitute |
 | Eval head | `$EVAL_HOST` (a002dc-0002) | 6385 (Redis) | Redis + `eval_candidate.py` (client) — **shared, pre-existing** |
 | Workers ×4 | a002dc-0004/0005/0006/0007 | local 6389 → head 6385 (tunnel) | 48 xTB workers each — **shared, pre-existing** |
 
@@ -182,10 +182,8 @@ Do **not** "fix" `/home/tsypin/opt_problem_optbench/validate.py`. It is shared; 
 
 **On the coordinator (`$COORD_HOST`):**
 - [Node.js 22+](https://nodejs.org/) (ships `npx`) — for the ClawInstitute server.
-- The [Claude Code](https://docs.claude.com/claude-code) CLI (`claude`), logged in — the recommended
-  **interactive** session (Part D) uses your desktop login directly. (Only relevant if you ever fall
-  back to a headless `claude -p`: a desktop OAuth session is **not** inherited by a spawned `-p`, so run
-  `claude setup-token` once.)
+- The [Codex CLI](https://developers.openai.com/codex/cli) (`codex`), logged in. Part D uses one
+  persisted `codex exec` session and resumes that exact session ID after interruption.
 - Python 3.9+ with `pip install -r requirements.txt` (just `requests`, `pyyaml`).
 - This `autoscientists/` repo, checked out on the branch you want to run.
 - Passwordless `ssh` to `$EVAL_HOST`.
@@ -433,39 +431,49 @@ ssh <host> 'tail -n 20 <opt_problem-checkout>/logs_validate/*.log'   # no repeat
 Back on the **coordinator**, from the template dir on the desired branch, with ClawInstitute running
 (Part A) and the eval pool live (Part B).
 
-**Run the orchestrator as a single, long-lived, *interactive* Claude Code session that you keep open
-and watch** — this is the upstream contract (`launch.py`: *"open `runbook.md` in a Claude Code session
-and follow it"*). Start the TUI, then give it **one** prompt:
+**Run the orchestrator as one long-lived, persisted `codex exec` session that you keep open and
+watch.** Give it one prompt:
 
 ```bash
 cd <your-checkout>/autoscientists
 
-# preflight: this CLI build must actually carry Opus 5 (must print >= 1)
-strings -a "$(readlink -f "$(which claude)")" | grep -c claude-opus-5
+# Preflight: verify this CLI exposes GPT-5.6-Sol and xhigh.
+codex debug models | python3 -c \
+  'import json,sys; m=next(x for x in json.load(sys.stdin)["models"] if x["slug"]=="gpt-5.6-sol"); assert "xhigh" in {r["effort"] for r in m["supported_reasoning_levels"]}; print(m["slug"], "xhigh")'
 
-claude --dangerously-skip-permissions --model claude-opus-5   # ONE interactive session, kept open + watched
-#  then type one prompt into it:
-#    Read runbook.md and execute. Task: task-sella. Run name: <run-name>.
+codex exec \
+  --dangerously-bypass-approvals-and-sandbox \
+  -m gpt-5.6-sol \
+  -c 'model_reasoning_effort="xhigh"' \
+  -c 'agents.default_subagent_model="gpt-5.6-sol"' \
+  -c 'agents.default_subagent_reasoning_effort="xhigh"' \
+  -c agents.max_concurrent_threads_per_session=10 \
+  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: <run-name>. Use fresh native Codex subagents only for the materialized roster."
 ```
 
-It loops open-ended until you `Ctrl+C`. **When the session ends or dies, continue it with
-`claude --resume --model claude-opus-5`** (pick that session) — this preserves the **full
-conversation context**, so the orchestrator never loses the champion / cycle state.
+It loops open-ended until you `Ctrl+C`. Record the session ID printed by `codex exec`. If the
+process ends or dies, continue that exact session:
 
-> **On the model flag.** CLI **2.1.220** carries Opus 5 and **does retain the session model across
-> `--resume`** (verified: a session created on `claude-opus-5` and resumed with no flag stayed on
-> `claude-opus-5`). Older builds did not: **2.1.207** silently resumed on `claude-opus-4-8`, and it
-> contained no `claude-opus-5` string at all — both `--model opus` and no-flag resolved to Opus 4.8.
-> So pass `--model claude-opus-5` explicitly anyway; it is free insurance against an older CLI or a
-> different machine, and the `strings` preflight above catches a build that can't honour it.
+```bash
+codex exec resume \
+  --dangerously-bypass-approvals-and-sandbox \
+  -m gpt-5.6-sol \
+  -c 'model_reasoning_effort="xhigh"' \
+  -c 'agents.default_subagent_model="gpt-5.6-sol"' \
+  -c 'agents.default_subagent_reasoning_effort="xhigh"' \
+  -c agents.max_concurrent_threads_per_session=10 \
+  <SESSION_ID> \
+  "Continue the existing open-ended runbook loop from persisted run state. Do not restart or reseed."
+```
 
-> ⚠️ **Do NOT wrap a headless `claude -p` in an auto-restart loop.** A `-p` shot starts a **fresh, empty
-> context** on every restart; the upstream resume (Step 0 "Resume after interruption") is prose-only with
-> a **non-persisted `cycle_count`**, so after many restarts a fresh-context session can mis-judge the
-> state and **reseed the search from baseline**. This happened in `sella_nocheat_r1` (the champion *data*
-> was protected by the pre-PUT fitness gate, but ~hours of compute were wasted re-exploring from
-> baseline). Interactive + `--resume` avoids it entirely. The biggest, longest-lived sessions are
-> `codex exec` (if codex is available) or a watched interactive `claude` — never a headless restart loop.
+Do not start a fresh `codex exec` after a crash and do not use `--last`; resume the recorded ID.
+A fresh context can misread the non-persisted `cycle_count` and reseed the search from baseline.
+That previously wasted hours in `sella_nocheat_r1`, even though the champion data itself remained
+protected by the pre-PUT gate.
+
+The command's concurrency cap fits the default roster (1 monitor + 6 CPU-eval + 3 analysts). If
+you deliberately launch a larger roster, set
+`agents.max_concurrent_threads_per_session` to at least the largest parallel wave.
 
 What happens:
 
@@ -491,10 +499,9 @@ What happens:
 > template (not a per-run copy) if not. Per-run tweaks go in the materialized `../<run-name>/` files,
 > never the template.
 
-The run uses **Opus 5** (`--model claude-opus-5`), inherited by all 10 subagents. Note: launching the
-loop with `--model claude-fable-5` on this chemistry content trips a safety fallback that silently
-switches to Opus anyway — that caveat still holds. Opus 5 itself was probed directly against this
-task's `TASK.md` and does **not** refuse it, so no fallback is expected on this run.
+The run uses **GPT-5.6-Sol at `xhigh`** for the parent and all rostered subagents. The child defaults
+are explicit in the command, while each native `spawn_agent` call leaves model and effort unset so
+no role is quietly downgraded.
 
 ### Run-name and ClawInstitute hygiene (do this before you type the prompt)
 
@@ -606,7 +613,7 @@ c=collections.Counter(json.loads(l).get('outcome') for l in open('$RUN/logs/expe
 print(dict(c))
 "
 
-# Sessions + raw agent transcripts
+# Sessions + run-local native child completion artifacts
 tail -f $RUN/logs/sessions.jsonl
 ls      $RUN/logs/raw/
 
@@ -653,7 +660,7 @@ space is exhausted. Re-run the Part B preflight rather than reading anything int
 ## Part F — Stop & clean up
 
 ```bash
-# 1. Stop the orchestrator: Ctrl+C in the interactive `claude` session (open-ended; only you stop it).
+# 1. Stop the orchestrator: Ctrl+C in the long-lived `codex exec` process (open-ended; only you stop it).
 #    That is the ONLY teardown this run performs.
 
 # 2. Eval plane: DO NOTHING. The pool, its Redis, and its workers are shared and pre-existing.
@@ -680,7 +687,7 @@ cleanup between runs.
 | **ALL cpu agents hanging on eval** | Wrong Redis port (`6390` is dead — it must be **6385**) or the pool is down → run the **Part B preflight** (B2–B4). Fix `EVAL_REDIS_PORT` in `system/templates/ROLE-CPU.md` **before** launch; a running run's agents have it baked into their `HEARTBEAT.md`. |
 | **Every candidate comes back `REJECTED_TEST`** | Either the test anchor is mis-seeded (a `test_metric_value` seeded from something better than the real baseline makes (b) unreachable — compare it against the Part B6 baseline test score) or the deployed TEST metadata doesn't match (expected SHA `8a1b4708...`, 250 molecules). Also check the corrected `validate.py` is deployed (SHA `e968f6db...`). |
 | **`champion.md` advances but `champion/algo.py` keeps the seed md5** | Step 7b1 propagation failed — the champion record moved without the code. The recorded champion is now a lie. Compare `md5 $RUN/champion/algo.py` against the seed and against the promoted `exp_id`'s candidate; stop and reconcile before more cycles. |
-| **`logs/experiments.jsonl` stays empty** | The ledger writer hook never fired (the orchestrator writes this file, not the agents) → confirm the orchestrator is past step 5 and that `$RUN/logs/` exists and is writable; check `$RUN/logs/raw/` for agent output that never got recorded. |
+| **`logs/experiments.jsonl` stays empty** | The ledger writer hook never fired (the orchestrator writes this file, not the agents) → confirm the orchestrator is past step 5 and that `$RUN/logs/` exists and is writable; inspect the matching `logs/raw/*.json` completion artifact and, when needed, the full native child transcript attached to the parent Codex session. |
 | Candidate scores `is_valid=0` unexpectedly | Wrong `validate.py` in `$SELLA_CHECKOUT`, or stale `molecules/train_XTB.json` / `test_XTB.json` there → re-run the validator SHA check and B5. |
 | Evals fail with connection refused | Eval target mismatch between `ROLE-CPU.md` and the live pool → align `EVAL_HOST` / `EVAL_REDIS_HOST` / `EVAL_REDIS_PORT` (Deployment parameters + Part D note). |
 | **Eval returns in ~2.6 s with `num_errors=250`**, `No such file or directory: .../molecules/xyz/<mol>_mm.xyz` | `--molecules-dir` was omitted (or points at a path the workers don't have) → always pass `--molecules-dir $EVAL_MOLECULES_DIR` (see B5). |
@@ -688,8 +695,8 @@ cleanup between runs.
 | Zero `REJECTED_TEST` over many cycles, many `KEEP`s | Suspect the test gate is not actually running — check that `test_fitness`/`test_is_valid` are non-null in `experiments.jsonl` and that `--split test` works (B6). |
 | **Frequent `NEAR_MISS` outcomes** | Not a fault — both gates passed and only the promotion race was lost; each one is auto-re-queued as `{exp_id}_stack`. It means the roster is racing itself, so some eval time goes to re-testing changes that already passed. Consider rotation sizing. Only investigate if the matching `_stack` items never appear in a team `queue.md`, or if `champion.md` *did* advance to a `NEAR_MISS` `exp_id` (that would be a promotion bug). |
 | Remote worker can't reach the eval head by name | Pass the **real hostname** (`a002dc-0002`); if name resolution fails on that host, use its **IP**. |
-| Whole loop dies silently after a long session | Continue the **same** interactive session with `claude --resume --model claude-opus-5` (preserves full context). Do **not** wrap a headless `claude -p` in an auto-restart loop — a fresh `-p` context + non-persisted `cycle_count` can reseed the search from baseline (see the Part D warning). |
-| Session resumed on the wrong model | Older CLIs (e.g. 2.1.207) resume on Opus 4.8 silently → always pass `--model claude-opus-5`, and run `strings -a "$(readlink -f "$(which claude)")" \| grep -c claude-opus-5` (must be ≥ 1). |
+| Whole loop dies silently after a long session | Resume the recorded session ID with `codex exec resume ... <SESSION_ID>` and the same model/effort/child-default flags. Do not start a fresh session or use `--last`; a fresh context plus non-persisted `cycle_count` can reseed the search from baseline (see Part D). |
+| Session resumed on the wrong model | Always repeat `-m gpt-5.6-sol`, `model_reasoning_effort="xhigh"`, and both child defaults on `codex exec resume`; the Part D model-catalog preflight verifies support. |
 
 ---
 
@@ -702,11 +709,15 @@ Set the [Deployment parameters](#deployment-parameters-set-these-first) first, t
 curl -sf http://localhost:3000/api/v1/workshops -o /dev/null && echo "clawinstitute UP"
 export CLAWINSTITUTE_TOKEN=<token>
 cd <your-checkout>/autoscientists && git switch <branch> && pip install -r requirements.txt
-strings -a "$(readlink -f "$(which claude)")" | grep -c claude-opus-5      # must be >= 1
-claude --dangerously-skip-permissions --model claude-opus-5   # ONE interactive session; type the prompt:
-#   Read runbook.md and execute. Task: task-sella. Run name: <run-name>.   (<=16 chars, unused name!)
-# resume after it dies (keeps context — never a headless -p restart loop):
-claude --resume --model claude-opus-5
+codex debug models | python3 -c 'import json,sys; m=next(x for x in json.load(sys.stdin)["models"] if x["slug"]=="gpt-5.6-sol"); assert "xhigh" in {r["effort"] for r in m["supported_reasoning_levels"]}; print(m["slug"], "xhigh")'
+codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-sol \
+  -c 'model_reasoning_effort="xhigh"' \
+  -c 'agents.default_subagent_model="gpt-5.6-sol"' \
+  -c 'agents.default_subagent_reasoning_effort="xhigh"' \
+  -c agents.max_concurrent_threads_per_session=10 \
+  "Read runbook.md and execute continuously as the only top-level orchestrator. Task: task-sella. Run name: <run-name>. Use fresh native Codex subagents only for the materialized roster."   # <=16 chars, unused name
+# After interruption, repeat the same flags with:
+# codex exec resume ... <SESSION_ID> "Continue the existing run; do not restart or reseed."
 
 # EVAL PLANE — SHARED, ALREADY RUNNING. Deploy this run's client files, then PREFLIGHT (read-only).
 scp task-sella/eval_candidate.py "$EVAL_HOST:$SELLA_CHECKOUT/eval_candidate.py"   # branch-matching
