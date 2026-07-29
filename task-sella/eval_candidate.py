@@ -2,10 +2,22 @@
 """Evaluate ONE candidate algo.py against a running Redis-backed worker pool.
 
 Prints the score dict as a single JSON object on stdout (last line). The score is
-identical to validate() (it reuses Evaluator + score_results). The per-molecule
-summary is intentionally DISABLED for this run — agents receive ONLY the aggregate
-score (fitness / is_valid / mean_rel_steps / max_final_energy_delta), no per-molecule
-breakdown.
+identical to validate() (it reuses Evaluator + score_results).
+
+The score dict also carries a **`per_molecule` breakdown on EVERY evaluation that
+produced any result — invalid runs included**, which are the ones it matters most for:
+
+    per_molecule.worst_by_rel_steps   the 8 molecules eating the most step budget
+    per_molecule.nearest_energy_gate  the 5 most under-relaxed (the validity risk)
+    per_molecule.non_converged        molecules that never converged
+    per_molecule.n_molecules
+
+A `fitness` of 1000.0 says only "no usable trajectory"; the aggregate cannot tell a
+change that broke 3 molecules from one that broke all 250, or from a harness error.
+`per_molecule` can. It is absent only when a total harness failure left no results at
+all. (It was disabled in an earlier run; that experiment is over — do not re-disable
+it without also correcting TASK.md, ROLE-CPU and ROLE-ANALYST, which now tell agents
+to read it.)
 
 Run from THIS RUN's dedicated client checkout on the eval head
 (/home/tsypin/opt_problem_as_testgate_opus5) — never from the shared workers' repo.
