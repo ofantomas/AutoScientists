@@ -118,11 +118,11 @@ drop it either, because invariant 3's floor still has to be met: replace it with
 
 **3. At least TWO items per team — one seed per team does not spread review coverage.**
 The seed count must exceed `REVIEW_CAP` (1 per agent per spawn — HEARTBEAT Part 1 (Boot), § Review
-backlog) so review coverage distributes. With one seed per team, a single booting agent's two review
-slots swallow two entire teams' queues, and every agent behind it finds nothing left to review; with
-two or more per team the run-wide seed count sits well above any one agent's cap, so the first
-cycle's endorsements come from several independent agents rather than from whichever agent boots
-first. Two is a floor, not a target: seed the smallest number ≥ 2 of *complete* items you can name.
+backlog) so review coverage distributes. With one seed per team, a single booting agent can clear
+that team's entire queue in its one review slot, and every later reviewer of that team finds nothing
+left to inspect; with two or more per team the team queue itself exceeds any one agent's cap, so the
+first cycle's endorsements must come from several independent agents rather than from whichever
+agent boots first. Two is a floor, not a target: seed the smallest number ≥ 2 of *complete* items you can name.
 This floor is not a licence to pad the count with a half-tagged item, and invariant 2 is not a
 licence to fall below the floor — a team that can only name one complete seed is a seed-spec failure
 to fix, and the code below raises rather than PUT a short queue.
@@ -196,8 +196,8 @@ REQUIRED_ITEM_FIELDS = ("id", "description", "priority", "axis", "direction",
                         "proposed_by")
 
 # Cold start seeds AT LEAST this many items per team. The floor must exceed REVIEW_CAP (1 review
-# per agent per spawn) so review coverage distributes: with one seed per team a single booting
-# agent's two slots cover two whole teams' queues and the agents behind it have nothing to review.
+# per agent per spawn) so review coverage distributes: with one seed in a team, one booting
+# agent can clear that team's whole queue and later reviewers have nothing left to inspect.
 # Do not "simplify" this back to 1.
 MIN_SEEDS_PER_TEAM = 2
 

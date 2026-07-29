@@ -1203,9 +1203,9 @@ run reports its honest measured `fitness`, so DISCARDs are no longer interchange
 - `fitness == 1000.0` = no usable trajectory (infra error, non-convergence, or blown budget). Infra
   errors are `FAILED`, not `DISCARD`, and never count here at all.
 
-**For a `1000.0` row, read the result file's `per_molecule` section before you count it against the
-axis.** Every evaluation now reports a per-molecule breakdown, invalid runs included, and it changes
-what a failed experiment means:
+**For a `1000.0` row, read the result file's TRAIN `per_molecule` section before you count it against
+the axis.** Every TRAIN evaluation that produced molecule results reports this breakdown, invalid
+runs included, and it changes what a failed experiment means:
 - `non_converged` lists a HANDFUL of molecules => the mechanism is **unguarded, not dead**. It works
   on 247 of 250 and the open question is what those few have in common. Do not treat that as evidence
   against the mechanism; the right next experiment is the same mechanism with a condition that

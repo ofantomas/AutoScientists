@@ -1870,6 +1870,12 @@ exp_value     = item.get("value")
 
 _sc = score or {}
 _ts = test_score or {}
+_per_molecule = _sc.get("per_molecule")
+_per_molecule_block = (
+    f"{FENCE}json\n{json.dumps(_per_molecule, sort_keys=True, indent=2)}\n{FENCE}"
+    if _per_molecule is not None
+    else "(unavailable — TRAIN produced no molecule results; treat as infrastructure evidence)"
+)
 
 # Diff for audit: full body if small, else hunk headers + count (Step 4).
 # `cycle_aborted` and the diff-artifact names come from Step 4's defaults block, which
@@ -1941,6 +1947,10 @@ post_id: null
 - max_final_energy_delta_kcal_mol: {_sc.get("max_final_energy_delta_kcal_mol")} (diagnostic only)
 - converged: {_sc.get("converged")} | num_results: {_sc.get("num_results")} | num_errors: {_sc.get("num_errors")}
 - duration_s: {_sc.get("duration_s")}
+
+### TRAIN `per_molecule`
+
+{_per_molecule_block}
 
 **Held-out test (250 molecules, `--split test`)** — {_test_line}
 - test_fitness: {our_test} (champion test anchor {champ_test}, delta {test_delta:+.6f})

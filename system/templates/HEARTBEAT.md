@@ -382,7 +382,7 @@ do not run a second batch; `REVIEW_CAP` is per spawn, not per step.** There is O
 ONE ceiling, and its single execution site is right here: **Part 1 (Boot), § Review backlog**. Your
 role file states the same rules because that is where the rest of your cycle points when it says
 "reviewed", not because it is a second batch to run. An agent that drains `REVIEW_CAP` items here
-and another `REVIEW_CAP` at its role step has spent four review slots in one spawn, padded past the
+and another `REVIEW_CAP` at its role step has spent two review slots in one spawn, padded past the
 ceiling this section calls a violation, and starved the ordering the FIFO sort exists to enforce.
 
 **On the resume-and-post branch this still runs FIRST**, before Part 5 posts the `[RESULT]` it
@@ -1323,7 +1323,8 @@ if our_metric is None and (out := pending_result.get("stdout_path")):
     try:
         log = Path(out).read_text(errors="ignore")
         # eval_candidate.py prints ONE JSON line; grab the last JSON object and
-        # read fitness / is_valid from it.
+        # recover the full score dict (including TRAIN per_molecule), then mirror
+        # fitness / is_valid into the legacy top-level sentinel fields.
         for line in reversed(log.splitlines()):
             line = line.strip()
             if line.startswith("{") and line.endswith("}"):
@@ -1332,12 +1333,13 @@ if our_metric is None and (out := pending_result.get("stdout_path")):
                 except Exception:
                     continue
                 if "fitness" in j:
+                    pending_result["score"] = j
                     our_metric = float(j["fitness"])
                     is_valid = j.get("is_valid", is_valid)
                     pending_result["fitness"] = our_metric
                     pending_result["is_valid"] = is_valid
                     pending_result["salvaged_from"] = (pending_result.get("salvaged_from", "") +
-                                                        "; fitness re-parsed from eval JSON")
+                                                        "; full score re-parsed from eval JSON")
                     break
     except Exception as e:
         print(f"[salvage] eval-JSON re-parse failed: {e}")
@@ -1939,6 +1941,12 @@ try:
     _fm_is_valid        = int(is_valid) if is_valid is not None else None
     _fm_test_is_valid   = int(test_is_valid) if test_is_valid is not None else None
     _fm_mean_rel_energy = _score.get("mean_rel_energy") if _score else None
+    _per_molecule = _score.get("per_molecule") if _score else None
+    _per_molecule_block = (
+        f"{FENCE}json\n{json.dumps(_per_molecule, sort_keys=True, indent=2)}\n{FENCE}"
+        if _per_molecule is not None
+        else "(unavailable — TRAIN produced no molecule results; treat as infrastructure evidence)"
+    )
 
     result_markdown = f"""---
 exp_id: {yaml_scalar(exp_id)}
@@ -1983,6 +1991,10 @@ Resumed from a prior session: true
 - max_final_energy_delta_kcal_mol: {_score.get("max_final_energy_delta_kcal_mol")} (diagnostic only)
 - converged: {_score.get("converged")} | num_results: {_score.get("num_results")} | num_errors: {_score.get("num_errors")}
 - duration_s: {_score.get("duration_s")}
+
+### TRAIN `per_molecule`
+
+{_per_molecule_block}
 
 **Held-out test (`--split test`)** — {_test_state}
 - test_fitness: {test_fitness} (champion test anchor {current_best_test}, delta {test_delta:+.6f})

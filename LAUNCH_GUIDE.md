@@ -256,12 +256,12 @@ shasum -a 256 task-sella/eval_candidate.py
 ssh "$EVAL_HOST" "sha256sum $SELLA_CHECKOUT/eval_candidate.py"     # must match the line above
 ```
 
-> **This branch's evaluator is aggregate-only by design.** `eval_candidate.py` emits **only** the
-> aggregate score (`fitness` / `is_valid` / `mean_rel_steps` / `mean_rel_energy` /
-> `max_final_energy_delta_kcal_mol` / `converged` + diagnostics); the per-molecule summary is
-> deliberately disabled, so **agents never see a per-molecule breakdown** and no per-molecule
-> artifacts are produced anywhere in the run. Deploy the copy that matches the orchestrator branch —
-> it is also the copy that accepts `--split test`, which this run's promotion gate requires.
+> **This branch's evaluator includes per-molecule diagnostics.** Alongside the aggregate score,
+> `eval_candidate.py` emits `per_molecule` whenever the evaluator returned any molecule results,
+> including scientifically invalid runs. The shared `results/{exp_id}.md` file publishes the
+> **TRAIN** breakdown for analyst diagnosis; held-out TEST evidence stays aggregate pass/fail in
+> shared results. Deploy the copy that matches the orchestrator branch — it is also the copy that
+> accepts `--split test`, which this run's promotion gate requires.
 > Also re-run the [validator SHA check](#-stop--the-shared-checkouts-validatepy-is-stale-read-before-deploying-anything) — it is the single most common silent misconfiguration.
 
 **B2. Redis alive, and how loaded is it?**
@@ -311,9 +311,11 @@ ssh "$EVAL_HOST" "cd $SELLA_CHECKOUT && JAX_ENABLE_X64=1 $EVAL_PYTHON eval_candi
   --redis-host localhost --redis-port 6385"
 ```
 
-Expect a **single JSON line** ending stdout, aggregate-only (no `per_molecule` key on this branch):
-`fitness`, `is_valid`, `mean_rel_steps`, `mean_rel_energy`, `max_final_energy_delta_kcal_mol`,
-`converged`, `invalid_reason`, `duration_s`, `num_results`, `num_errors`, `lower_is_better`.
+Expect a **single JSON line** ending stdout with `fitness`, `is_valid`, `mean_rel_steps`,
+`mean_rel_energy`, `max_final_energy_delta_kcal_mol`, `converged`, `invalid_reason`, `duration_s`,
+`num_results`, `num_errors`, and `lower_is_better`; whenever any molecule results were returned it
+also includes `per_molecule`, containing `worst_by_rel_steps`, `nearest_energy_gate`, and
+`non_converged`.
 
 **Verified baseline (measured on this pool 2026-07-27, stock Sella `algo.py`, against the
 **regenerated** metadata in `$EVAL_MOLECULES_DIR`) — TRAIN:**
